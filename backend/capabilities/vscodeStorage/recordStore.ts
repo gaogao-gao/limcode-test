@@ -420,8 +420,9 @@ async function withCrossProcessRecordStoreLock<T>(indexUri: vscode.Uri, action: 
       await createRecordStoreLockDirectory(lockPath, metadata);
       break;
     } catch (error) {
-      if (!(await isRecordStoreLockContentionError(error, lockPath))) throw error;
-      if (await removeStaleRecordStoreLock(lockPath, metadata.indexPath)) continue;
+      const contention = await isRecordStoreLockContentionError(error, lockPath);
+      if (!contention && !(await isTransientRecordStoreCandidateRenameError(error, lockPath))) throw error;
+      if (contention && await removeStaleRecordStoreLock(lockPath, metadata.indexPath)) continue;
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for record store lock: ${indexPath}`);
       await delay(25);
     }
@@ -585,6 +586,32 @@ async function isRecordStoreLockContentionError(error: unknown, lockPath: string
     return (await fs.stat(lockPath)).isDirectory();
   } catch {
     return false;
+  }
+}
+
+/**
+ * Windows only: the candidate publication rename can fail transiently (EPERM/EACCES/EBUSY) when
+ * an external reader — antivirus real-time scan, search indexer — holds a handle inside the
+ * candidate directory while the canonical lock path does NOT exist yet. This is not lock
+ * contention, so isRecordStoreLockContentionError cannot classify it (its stat(lockPath)
+ * fails), and without this branch the transient error escapes raw and kills the caller's turn.
+ * Treat it as retryable within the acquire deadline; the rename remains the only atomic
+ * compare-and-swap, so retrying cannot weaken mutual exclusion.
+ */
+async function isTransientRecordStoreCandidateRenameError(error: unknown, lockPath: string): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  const renameError = error as { code?: unknown; syscall?: unknown; dest?: unknown };
+  if (
+    (renameError.code !== 'EPERM' && renameError.code !== 'EACCES' && renameError.code !== 'EBUSY')
+    || renameError.syscall !== 'rename'
+    || typeof renameError.dest !== 'string'
+    || path.resolve(renameError.dest) !== path.resolve(lockPath)
+  ) return false;
+  try {
+    await fs.stat(lockPath);
+    return false; // lockPath exists -> another owner holds the lock; contention path handles it
+  } catch {
+    return true; // lockPath absent -> the candidate itself is transiently busy
   }
 }
 

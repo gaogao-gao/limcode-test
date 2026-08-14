@@ -359,3 +359,146 @@ test('损坏设置会报错且不会被默认值覆盖', async () => {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
 });
+test('Windows 候选目录瞬态 busy(lockPath 不存在)的发布 rename 会重试后成功', {
+  skip: process.platform !== 'win32'
+}, async () => {
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'limcode-sync-lock-win-transient-'));
+  const resourcePath = path.join(tempRoot, 'index.json');
+  const lockPath = `${resourcePath}.lock`;
+  const originalRenameSync = fs.renameSync;
+  let transientErrors = 0;
+  try {
+    fs.renameSync = function injectedTransientCandidateBusy(source, destination) {
+      const sourceText = String(source);
+      const destinationText = String(destination);
+      const isPublication = destinationText === lockPath
+        && sourceText.startsWith(`${lockPath}.candidate-`);
+      if (isPublication && transientErrors < 2 && !fs.existsSync(lockPath)) {
+        transientErrors += 1;
+        throw Object.assign(
+          new Error(`EPERM: operation not permitted, rename '${sourceText}' -> '${destinationText}'`),
+          { code: 'EPERM', syscall: 'rename', path: sourceText, dest: destinationText }
+        );
+      }
+      return originalRenameSync.call(this, source, destination);
+    };
+
+    let actionRuns = 0;
+    syncStorageResourceLock.withSyncStorageResourceLock(resourcePath, () => {
+      actionRuns += 1;
+    }, { waitMs: 1_000, pollIntervalMs: 1, maxRetries: 6, retryDelayMs: 1 });
+    assert.equal(actionRuns, 1);
+    assert.equal(transientErrors, 2);
+    assert.deepEqual(
+      (await fsp.readdir(tempRoot)).filter((entry) => entry.startsWith('index.json.lock')),
+      []
+    );
+  } finally {
+    fs.renameSync = originalRenameSync;
+    await fsp.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Windows 候选目录持续 busy 时有界等待并报超时而非裸 EPERM', {
+  skip: process.platform !== 'win32'
+}, async () => {
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'limcode-sync-lock-win-stuck-'));
+  const resourcePath = path.join(tempRoot, 'index.json');
+  const lockPath = `${resourcePath}.lock`;
+  const originalRenameSync = fs.renameSync;
+  let attempts = 0;
+  try {
+    fs.renameSync = function injectedPersistentCandidateBusy(source, destination) {
+      const sourceText = String(source);
+      const destinationText = String(destination);
+      const isPublication = destinationText === lockPath
+        && sourceText.startsWith(`${lockPath}.candidate-`);
+      if (isPublication) {
+        attempts += 1;
+        throw Object.assign(
+          new Error('EPERM: injected persistent candidate busy'),
+          { code: 'EPERM', syscall: 'rename', path: sourceText, dest: destinationText }
+        );
+      }
+      return originalRenameSync.call(this, source, destination);
+    };
+
+    assert.throws(
+      () => syncStorageResourceLock.withSyncStorageResourceLock(resourcePath, () => {}, {
+        waitMs: 120, pollIntervalMs: 5, maxRetries: 6, retryDelayMs: 1
+      }),
+      (error) => error instanceof Error
+        && error.message.includes('Timed out waiting for sync storage resource lock')
+    );
+    assert.ok(attempts > 1, 'deadline 内应多次重试发布 rename');
+  } finally {
+    fs.renameSync = originalRenameSync;
+    await fsp.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Windows 候选目录 owner.json 写入失败不被误判为瞬态 rename busy', {
+  skip: process.platform !== 'win32'
+}, async () => {
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'limcode-sync-lock-win-writefail-'));
+  const resourcePath = path.join(tempRoot, 'index.json');
+  const lockPath = `${resourcePath}.lock`;
+  const originalWriteFileSync = fs.writeFileSync;
+  try {
+    fs.writeFileSync = function injectedOwnerWriteFailure(target, ...rest) {
+      const targetText = String(target);
+      if (targetText.startsWith(`${lockPath}.candidate-`) && targetText.endsWith('owner.json')) {
+        throw Object.assign(new Error('EACCES: injected owner.json write failure'), {
+          code: 'EACCES', syscall: 'open', path: targetText
+        });
+      }
+      return originalWriteFileSync.call(this, target, ...rest);
+    };
+
+    assert.throws(
+      () => syncStorageResourceLock.withSyncStorageResourceLock(resourcePath, () => {}, {
+        waitMs: 1_000, pollIntervalMs: 1, maxRetries: 6, retryDelayMs: 1
+      }),
+      (error) => error?.code === 'EACCES'
+    );
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+    await fsp.rm(tempRoot, { recursive: true, force: true });
+  }
+});test('Windows 异步记录库锁候选目录瞬态 busy(lockPath 不存在)会重试后成功', {
+  skip: process.platform !== 'win32'
+}, async () => {
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'limcode-record-store-win-transient-'));
+  const transactionPath = path.join(tempRoot, 'authority');
+  const lockPath = `${transactionPath}.lock`;
+  const originalRename = fsp.rename;
+  let transientErrors = 0;
+  try {
+    fsp.rename = async (source, destination) => {
+      const isPublication = destination === lockPath
+        && String(source).startsWith(`${lockPath}.candidate-`);
+      if (isPublication && transientErrors < 2) {
+        const lockExists = await fsp.stat(lockPath).then(() => true, () => false);
+        if (!lockExists) {
+          transientErrors += 1;
+          throw Object.assign(new Error('EPERM: injected transient candidate busy'), {
+            code: 'EPERM', syscall: 'rename', path: String(source), dest: String(destination)
+          });
+        }
+      }
+      return originalRename(source, destination);
+    };
+
+    let actionRuns = 0;
+    await recordStore.withRecordStoreTransaction(MockUri.file(transactionPath), async () => { actionRuns += 1; });
+    assert.equal(actionRuns, 1);
+    assert.equal(transientErrors, 2);
+    assert.deepEqual(
+      (await fsp.readdir(tempRoot)).filter((entry) => entry.startsWith('authority.lock')),
+      []
+    );
+  } finally {
+    fsp.rename = originalRename;
+    await fsp.rm(tempRoot, { recursive: true, force: true });
+  }
+});

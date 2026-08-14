@@ -105,8 +105,9 @@ function acquireSyncStorageResourceLock(resourcePath: string, options: Normalize
       createLockDirectory(lockPath, metadata, options);
       return { lockPath, metadata };
     } catch (error) {
-      if (!isLockContentionError(error, lockPath)) throw error;
-      if (recoverExistingLockDirectory(lockPath, options)) continue;
+      const contention = isLockContentionError(error, lockPath);
+      if (!contention && !isTransientCandidateRenameError(error, lockPath)) throw error;
+      if (contention && recoverExistingLockDirectory(lockPath, options)) continue;
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for sync storage resource lock: ${lockPath}`);
       sleepSync(Math.min(options.pollIntervalMs, Math.max(1, deadline - Date.now())));
     }
@@ -308,6 +309,32 @@ function isLockContentionError(error: unknown, lockPath: string): boolean {
     return fs.statSync(lockPath).isDirectory();
   } catch {
     return false;
+  }
+}
+
+/**
+ * Windows only: the publication rename can fail transiently (EPERM/EACCES/EBUSY) when an
+ * external reader — antivirus real-time scan, search indexer — holds a handle inside the
+ * candidate directory while the canonical lock path does NOT exist yet. This is not lock
+ * contention, so isLockContentionError cannot classify it (its statSync(lockPath) fails),
+ * and without this branch the transient error escapes raw and kills the caller's turn.
+ * Treat it as retryable within the acquire deadline; the rename remains the only atomic
+ * compare-and-swap, so retrying cannot weaken mutual exclusion.
+ */
+function isTransientCandidateRenameError(error: unknown, lockPath: string): boolean {
+  if (process.platform !== 'win32') return false;
+  const candidate = error as { code?: unknown; syscall?: unknown; dest?: unknown };
+  if (
+    (candidate.code !== 'EPERM' && candidate.code !== 'EACCES' && candidate.code !== 'EBUSY')
+    || candidate.syscall !== 'rename'
+    || typeof candidate.dest !== 'string'
+    || path.resolve(candidate.dest) !== path.resolve(lockPath)
+  ) return false;
+  try {
+    fs.statSync(lockPath);
+    return false; // lockPath exists -> another owner holds the lock; contention path handles it
+  } catch {
+    return true; // lockPath absent -> the candidate itself is transiently busy
   }
 }
 
