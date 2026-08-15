@@ -173,8 +173,11 @@ export interface ProviderDispatchOptions {
 }
 
 const DEFAULT_PROVIDER_DISPATCH_TIMEOUT_MS = 20 * 60 * 1_000;
-const DEFAULT_PROVIDER_FIRST_SEMANTIC_TIMEOUT_MS = 80_000;
-const DEFAULT_PROVIDER_SEMANTIC_IDLE_TIMEOUT_MS = 60_000;
+// 思考型模型（kimi-k3 等）在大上下文 prefill / 反代网关缓冲下，首个语义事件与思考间隙可长达数分钟。
+// 误杀代价不可恢复（已收到输出后不重放，部分输出作废且手动重新生成会撞同一堵墙）；
+// 真死连接仍由 20 分钟 dispatch 超时兼底，用户也可手动取消。因此默认值向宽容侧倾斜。
+const DEFAULT_PROVIDER_FIRST_SEMANTIC_TIMEOUT_MS = 300_000;
+const DEFAULT_PROVIDER_SEMANTIC_IDLE_TIMEOUT_MS = 600_000;
 const DEFAULT_PROVIDER_ACTIVITY_HEARTBEAT_MS = 5_000;
 const DEFAULT_COMPRESSION_COMPLETION_TIMEOUT_MS = 4.5 * 60 * 1_000;
 const DEFAULT_PROVIDER_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;

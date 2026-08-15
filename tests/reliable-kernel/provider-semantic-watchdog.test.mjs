@@ -452,10 +452,10 @@ test('已提交 retrying/not-before 在 Host handoff 后由新 ControlPlane 恢�
   });
 });
 
-test('生产 deadline 固定为普通首语义80秒/idle60秒与压缩终态270秒', () => {
+test('生产 deadline 固定为普通首语义300秒/idle600秒与压缩终态270秒', () => {
   assert.deepEqual(kernel.RELIABLE_PROVIDER_SEMANTIC_DEADLINES_MS, {
-    ordinaryFirst: 80_000,
-    ordinaryIdle: 60_000,
+    ordinaryFirst: 300_000,
+    ordinaryIdle: 600_000,
     compressionCompletion: 270_000
   });
 });
@@ -625,10 +625,12 @@ test('Provider semantic checkpoint overflow 有界合并且 terminal summary 仍
 test('单条 thought 后的合法静默在 idle 边界内完成且不创建重试 Attempt', async () => {
   await withApp('provider-legitimate-thought-silence', async (app, conversationId, turnId) => {
     const provider = controlPlane(app, {
+      // 合法静默只需小于 idle 边界；并行测试负载下 SQLite/CAS 调度抖动可达数百毫秒，
+      // 边界留足余量，避免把测试环境抖动误判成看门狗误触发。
       semanticTimeouts: {
-        firstSemanticMs: 160,
-        semanticIdleMs: 120,
-        compressionCompletionMs: 240
+        firstSemanticMs: 1_000,
+        semanticIdleMs: 1_000,
+        compressionCompletionMs: 2_000
       }
     });
     const request = await createRequest(app, conversationId, turnId, 'legitimate-thought-silence');

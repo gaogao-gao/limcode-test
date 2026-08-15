@@ -1305,8 +1305,8 @@ async function checkProviderFullRequest() {
     assert.equal((await get(ctx.database, 'ModelRequest', doubleTransient.modelRequestId)).status, 'terminal');
 
     assert.deepEqual(kernel.RELIABLE_PROVIDER_SEMANTIC_DEADLINES_MS, {
-      ordinaryFirst: 80_000,
-      ordinaryIdle: 60_000,
+      ordinaryFirst: 300_000,
+      ordinaryIdle: 600_000,
       compressionCompletion: 270_000
     });
 
