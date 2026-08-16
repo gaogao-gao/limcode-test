@@ -120,7 +120,7 @@ function settingsErrorStatus(requestType: string | undefined, message: string): 
 }
 
 function emptyCommon(): GlobalSettingsRecord {
-  return { dataFilePath: '', proxy: '', activeDataRootPath: '', defaultDataRootPath: '' };
+  return { dataFilePath: '', proxy: '', proxyShellAndMcp: false, activeDataRootPath: '', defaultDataRootPath: '' };
 }
 
 function emptyLlm(): LlmSettingsRecord {
@@ -791,6 +791,7 @@ function plainSettingsFromState(state: GlobalSettingsState, section: GlobalSetti
       return {
         dataFilePath: state.common.dataFilePath,
         proxy: state.common.proxy,
+        proxyShellAndMcp: state.common.proxyShellAndMcp,
         activeDataRootPath: state.common.activeDataRootPath,
         defaultDataRootPath: state.common.defaultDataRootPath
       };
@@ -1121,6 +1122,7 @@ export const useGlobalSettingsStore = defineStore('globalSettings', {
         settings: {
           dataFilePath: this.common.dataFilePath,
           proxy: this.common.proxy,
+          proxyShellAndMcp: this.common.proxyShellAndMcp,
           activeDataRootPath: this.common.activeDataRootPath,
           defaultDataRootPath: this.common.defaultDataRootPath
         }

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { EXTENSION_PACKAGE_NAME, EXTENSION_VERSION } from '../../../shared/extensionIdentity';
+import type { GlobalSettingsRecord } from '../../../shared/protocol';
 import { resolveDataRootUri } from '../../capabilities/vscodeStorage/globalStatus';
 import {
   createVscodeStoragePaths,
@@ -30,7 +31,7 @@ import {
   VscodeReliableToolHost,
   type VscodeReliableToolHostOptions
 } from './VscodeReliableToolHost';
-import { applyProxyEnvironment, normalizeProxySetting } from './proxyEnvironment';
+import { applyProxyEnvironment, normalizeProxySetting, proxyForShellAndMcp } from './proxyEnvironment';
 import { VscodeReliableFileDiffEditor } from './VscodeReliableFileDiffEditor';
 import { getRuntimeBuildInfo } from '../runtimeBuildInfo';
 import { ReliableConversationRunner } from './ReliableConversationRunner';
@@ -154,7 +155,7 @@ export class VscodeReliableKernelProductRuntime {
       loadProviderConfig: (providerConfigId) => configuration.providerConfig(providerConfigId),
       proxy: async () => {
         const common = await configuration.loadGlobalSettings('common');
-        const proxy = (common.settings as import('../../../shared/protocol').GlobalSettingsRecord).proxy;
+        const proxy = (common.settings as GlobalSettingsRecord).proxy;
         // 宽容解析：允许用户省略 http:// scheme；非法值视为未设置（直连），不让请求侧抛 URL 错误。
         return normalizeProxySetting(proxy);
       },
@@ -381,10 +382,10 @@ export class VscodeReliableKernelProductRuntime {
           driveIfPresent: (input) => conversations!.driveManualCompressionIfPresent(input)
         }
       });
-      // 全局代理同时注入扩展宿主进程环境：shell 工具的子孙进程（wrapper → PowerShell → curl/git）
-      // 自动继承。设置保存时由 CommandRouter 重新应用；此处负责启动时的首次应用。
+      // shell 覆盖是显式 opt-in；开启后把代理注入扩展宿主进程环境，子孙进程
+      // （wrapper → PowerShell → curl/git）自动继承。设置保存时由 CommandRouter 重新应用。
       void configuration.loadGlobalSettings('common')
-        .then((stored) => applyProxyEnvironment((stored.settings as import('../../../shared/protocol').GlobalSettingsRecord).proxy))
+        .then((stored) => applyProxyEnvironment(proxyForShellAndMcp(stored.settings as GlobalSettingsRecord)))
         .catch(() => undefined);
       return new VscodeReliableKernelProductRuntime({
         application,

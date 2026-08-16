@@ -2636,6 +2636,8 @@ export interface LlmProviderModelsSnapshotPayload {
 export interface GlobalSettingsRecord {
   dataFilePath: string;
   proxy: string;
+  /** 代理是否同时覆盖 shell 子进程与 MCP 连接；默认 false，仅 LLM 链路使用代理。 */
+  proxyShellAndMcp: boolean;
   activeDataRootPath: string;
   defaultDataRootPath: string;
 }

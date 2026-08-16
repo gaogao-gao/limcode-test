@@ -21,6 +21,8 @@ export interface LimCodeGlobalStatus {
   schemaVersion: typeof STORAGE_VERSION;
   dataRootPath: string;
   proxy: string;
+  /** 代理是否同时覆盖 shell 子进程与 MCP 连接；缺省/false 时只作用于 LLM 链路。 */
+  proxyShellAndMcp?: boolean;
   updatedAt: string;
   lastMigration?: StorageRootMigrationStatus;
 }
@@ -54,12 +56,13 @@ export async function saveGlobalStatus(
   context: vscode.ExtensionContext,
   dataRootPath: string,
   proxy: string,
-  lastMigration?: StorageRootMigrationStatus
+  lastMigration?: StorageRootMigrationStatus,
+  proxyShellAndMcp?: boolean
 ): Promise<LimCodeGlobalStatus> {
   const uri = globalStatusFileUri(context);
   return withRecordStoreTransaction(uri, async () => {
     const previous = await loadStatusInsideLock(context, uri);
-    return commitStatus(context, uri, previous, dataRootPath, proxy, lastMigration);
+    return commitStatus(context, uri, previous, dataRootPath, proxy, lastMigration, proxyShellAndMcp);
   });
 }
 
@@ -68,7 +71,8 @@ export async function saveGlobalStatusExpected(
   context: vscode.ExtensionContext,
   dataRootPath: string,
   proxy: string,
-  expectedRevision: string
+  expectedRevision: string,
+  proxyShellAndMcp?: boolean
 ): Promise<{ current: LimCodeGlobalStatus; previous: LimCodeGlobalStatus }> {
   const uri = globalStatusFileUri(context);
   return withRecordStoreTransaction(uri, async () => {
@@ -77,7 +81,7 @@ export async function saveGlobalStatusExpected(
     if (actualRevision !== expectedRevision) {
       throw new SettingsRevisionConflictError('common', expectedRevision, actualRevision);
     }
-    const current = await commitStatus(context, uri, previous, dataRootPath, proxy);
+    const current = await commitStatus(context, uri, previous, dataRootPath, proxy, undefined, proxyShellAndMcp);
     return { current, previous };
   });
 }
@@ -87,6 +91,7 @@ export function globalStatusRevision(status: LimCodeGlobalStatus): string {
     schemaVersion: status.schemaVersion,
     dataRootPath: status.dataRootPath,
     proxy: status.proxy,
+    proxyShellAndMcp: status.proxyShellAndMcp === true,
     ...(status.lastMigration ? { lastMigration: status.lastMigration } : {})
   });
 }
@@ -102,6 +107,7 @@ export function createGlobalSettingsRecord(
   return {
     dataFilePath: status.dataRootPath,
     proxy: status.proxy,
+    proxyShellAndMcp: status.proxyShellAndMcp === true,
     activeDataRootPath: resolveDataRootUri(context, status.dataRootPath).fsPath,
     defaultDataRootPath: context.globalStorageUri.fsPath
   };
@@ -159,12 +165,14 @@ async function commitStatus(
   previous: LimCodeGlobalStatus,
   dataRootPath: string,
   proxy: string,
-  lastMigration?: StorageRootMigrationStatus
+  lastMigration?: StorageRootMigrationStatus,
+  proxyShellAndMcp?: boolean
 ): Promise<LimCodeGlobalStatus> {
   const status: LimCodeGlobalStatus = {
     schemaVersion: STORAGE_VERSION,
     dataRootPath: normalizeStatusDataRootPath(context, dataRootPath),
     proxy: typeof proxy === 'string' ? proxy.trim() : '',
+    proxyShellAndMcp: proxyShellAndMcp ?? (previous.proxyShellAndMcp === true),
     updatedAt: new Date().toISOString(),
     ...(lastMigration ? { lastMigration: requireMigration(lastMigration) }
       : previous.lastMigration ? { lastMigration: { ...previous.lastMigration } } : {})
@@ -187,6 +195,7 @@ function statusFromGlobalState(context: vscode.ExtensionContext): LimCodeGlobalS
     schemaVersion: STORAGE_VERSION,
     dataRootPath: sameFsPath(dataRootPath, context.globalStorageUri.fsPath) ? '' : dataRootPath,
     proxy: typeof stored?.proxy === 'string' ? stored.proxy.trim() : '',
+    proxyShellAndMcp: stored?.proxyShellAndMcp === true,
     updatedAt: typeof stored?.updatedAt === 'string' && stored.updatedAt.trim()
       ? stored.updatedAt
       : new Date(0).toISOString(),
@@ -207,10 +216,14 @@ function parseGlobalStatus(uri: vscode.Uri, value: unknown): LimCodeGlobalStatus
   }
   const lastMigration = record.lastMigration === undefined ? undefined : normalizeLastMigration(record.lastMigration);
   if (record.lastMigration !== undefined && !lastMigration) throw new Error(`全局状态迁移信息损坏：${uri.fsPath}`);
+  if (record.proxyShellAndMcp !== undefined && typeof record.proxyShellAndMcp !== 'boolean') {
+    throw new Error(`全局状态代理开关损坏：${uri.fsPath}`);
+  }
   return {
     schemaVersion: STORAGE_VERSION,
     dataRootPath: normalizeDataRootPath(record.dataRootPath),
     proxy: record.proxy.trim(),
+    proxyShellAndMcp: record.proxyShellAndMcp === true,
     updatedAt: record.updatedAt,
     ...(lastMigration ? { lastMigration } : {})
   };

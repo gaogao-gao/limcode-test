@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import SettingsLoadingInline from '@webview/components/settings/SettingsLoadingInline.vue';
+import LcCheckbox from '@webview/components/ui/LcCheckbox.vue';
 import { useGlobalSettingsStore } from '@webview/stores/useGlobalSettingsStore';
 import { useSettingsLoadingText } from '@webview/composables/useSettingsLoading';
 
@@ -25,9 +26,22 @@ function inputNumber(event: Event): number {
     </header>
 
     <label class="global-settings-field">
-      <span>网络代理地址（留空则直连；例如 http://127.0.0.1:7890）</span>
-      <input v-model="settings.common.proxy" type="text" placeholder="http://127.0.0.1:7890" />
+      <span>网络代理地址（留空则直连；可省略 http://，例如 127.0.0.1:7897）</span>
+      <input v-model="settings.common.proxy" type="text" placeholder="127.0.0.1:7897 或 http://127.0.0.1:7897" />
     </label>
+
+    <div class="global-settings-field">
+      <span>代理覆盖范围</span>
+      <LcCheckbox
+        :model-value="settings.common.proxyShellAndMcp"
+        size="sm"
+        aria-label="让 shell 工具与 MCP 连接使用代理"
+        @update:model-value="settings.common.proxyShellAndMcp = $event"
+      >
+        <span class="global-settings-checkbox-label">同时覆盖 shell 工具与 MCP 连接</span>
+      </LcCheckbox>
+      <span class="global-settings-field-hint">默认关闭，仅 LLM 提供商连接使用代理；勾选后新启动的 shell 子进程继承代理环境变量，MCP 连接保存后自动重建。</span>
+    </div>
 
     <label class="global-settings-field">
       <span>数据目录路径（留空使用 VS Code 默认目录；保存后只迁移并删除旧目录中已注册的插件数据目录）</span>

@@ -644,7 +644,8 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
         context,
         current.dataFilePath,
         input.proxy ?? current.proxy,
-        expectedRevision
+        expectedRevision,
+        input.proxyShellAndMcp ?? current.proxyShellAndMcp
       );
       const committed = createGlobalSettingsRecord(context, committedStatus.current);
       return {

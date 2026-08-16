@@ -84,7 +84,13 @@ export function createVsCodeStorageCapability(context: vscode.ExtensionContext):
     const targetDataRootPath = normalizeStatusDataRootPath(context, input?.dataFilePath ?? '');
     const targetRootUri = resolveDataRootUri(context, targetDataRootPath);
     const migration = await migrateStorageRoot(previousPaths.globalStorageUri, targetRootUri);
-    await saveGlobalStatus(context, targetDataRootPath, input?.proxy ?? '', migration.skipped ? undefined : { fromPath: migration.fromPath, toPath: migration.toPath, migratedAt: migration.migratedAt });
+    await saveGlobalStatus(
+      context,
+      targetDataRootPath,
+      input?.proxy ?? '',
+      migration.skipped ? undefined : { fromPath: migration.fromPath, toPath: migration.toPath, migratedAt: migration.migratedAt },
+      input?.proxyShellAndMcp
+    );
     return loadCommonGlobalSettings();
   }
 

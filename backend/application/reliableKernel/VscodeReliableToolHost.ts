@@ -13,6 +13,7 @@ import { createRulesCatalogCapability } from '../../capabilities/rulesCatalog';
 import { createVsCodeFsCapability } from '../../capabilities/vscodeFs';
 import { createWorkEnvironmentRuntimeCapability } from '../../capabilities/workEnvironmentTransfer';
 import { McpRuntimeManager, dedupeMcpToolNames } from '../mcpRuntimeManager';
+import { proxyForShellAndMcp } from './proxyEnvironment';
 import { createBuiltinToolDefinitions } from '../../world/modules/tools/definitions';
 import {
   toolDefinitionRecord,
@@ -84,7 +85,7 @@ export class VscodeReliableToolHost implements ReliableToolDispatcherHost {
     this.mcp = new McpRuntimeManager({
       loadGlobalSettings: (section) => configuration.loadGlobalSettings(section),
       resolveProxySetting: async () =>
-        ((await configuration.loadGlobalSettings('common')).settings as GlobalSettingsRecord).proxy
+        proxyForShellAndMcp((await configuration.loadGlobalSettings('common')).settings as GlobalSettingsRecord)
     });
     this.mcp.setStateChangeListener(() => this.notifyStateChange());
     this.builtins = createBuiltinToolDefinitions({ command: this.commandDeclaration });
