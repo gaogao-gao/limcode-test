@@ -104,10 +104,17 @@ const originLinkByConversationId = computed(() => selectConversationOriginLinks(
 const visibleHistoryNodes = computed(() => flattenVisibleHistoryNodes(historyForest.value, expandedConversationIds.value));
 const historyScrollbarRefreshKey = computed(() => `${visibleEntries.value.length}:${visibleHistoryNodes.value.length}`);
 const historyCountText = computed(() => {
-  if (!historyReady.value) return '正在加载对话…';
-  const hiddenPendingDeletes = entries.value.length - visibleEntries.value.length;
+  if (!historyReady.value) return "正在加载对话...";
+  // 收藏视图只反映当前已加载页内被收藏的条目数;其他视图按后端分页 total 统计
+  if (favoritesViewActive.value) {
+    return `${displayEntries.value.length} 个收藏 · 当前页`;
+  }
+  // 待删除隐藏数只统计真正因删除/移除被隐藏的条目,不把空会话过滤算进去,避免低估总数
+  const hiddenPendingDeletes = entries.value.filter((entry) =>
+    deletingConversationIds.value.has(entry.id) || removedConversationIds.value.has(entry.id)
+  ).length;
   const total = Math.max(0, (pageInfo.value?.total ?? entries.value.length) - hiddenPendingDeletes);
-  const page = pageInfo.value ? `第 ${pageInfo.value.pageIndex + 1} 页` : '当前页';
+  const page = pageInfo.value ? `第 ${pageInfo.value.pageIndex + 1} 页` : "当前页";
   return `${total} 个对话 · ${page}`;
 });
 const currentScopeLabel = computed(() => currentProjectScope.value.kind === 'unbound' ? '未绑定' : '当前项目');
