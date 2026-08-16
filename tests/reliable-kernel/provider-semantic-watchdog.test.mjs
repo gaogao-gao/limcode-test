@@ -727,7 +727,6 @@ test('Provider 在 durable stream event 提交阻塞时仍保持 semantic idle w
       await releaseCommitPromise;
       return originalCommit(input);
     };
-    const startedAt = Date.now();
     const dispatch = provider.dispatch(request.modelRequestId, {
       providerId: 'provider-watchdog',
       async sendFullRequest(_request, controls) {
@@ -739,12 +738,14 @@ test('Provider 在 durable stream event 提交阻塞时仍保持 semantic idle w
     }, { timeoutMs: 500 });
     try {
       await commitStartedPromise;
-      await assert.rejects(dispatch, /no semantic progress for 35ms/);
+      // 关键语义是 semantic idle watchdog 判定 stream_stalled；不要用品尝墙钟时间断言，
+      // retryAfterOutput 允许多个 Attempt 后，Windows/CI 负载下 300ms 阈值会稳定误报。
+      await assert.rejects(dispatch, (error) =>
+        error?.reason === 'stream_stalled' && /no semantic progress for 35ms/.test(error.message));
     } finally {
       releaseCommit();
       app.database.commitModelStreamEvent = originalCommit;
     }
-    assert.ok(Date.now() - startedAt < 300, 'semantic watchdog must win before the outer dispatch deadline');
   });
 });
 
