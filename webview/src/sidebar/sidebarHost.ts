@@ -5,6 +5,7 @@ const host = createHostApi();
 
 export interface SidebarHostState {
   expandedConversationIds: string[];
+  favoriteConversationIds: string[];
 }
 
 export function postSidebarMessage(message: SidebarToExtensionMessage): void {
@@ -15,21 +16,32 @@ export function onSidebarMessage(handler: (message: ExtensionToSidebarMessage) =
   return host.onMessage((raw) => handler(raw as ExtensionToSidebarMessage));
 }
 
+function readIdList(state: Record<string, unknown>, key: string): string[] {
+  const value = state[key];
+  return Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0))]
+    : [];
+}
+
 export function readSidebarHostState(): SidebarHostState {
   const state = host.getState<unknown>();
   if (!state || typeof state !== 'object' || Array.isArray(state)) {
-    return { expandedConversationIds: [] };
+    return { expandedConversationIds: [], favoriteConversationIds: [] };
   }
-  const expanded = (state as { expandedConversationIds?: unknown }).expandedConversationIds;
+  const record = state as Record<string, unknown>;
   return {
-    expandedConversationIds: Array.isArray(expanded)
-      ? [...new Set(expanded.filter((value): value is string => typeof value === 'string' && value.length > 0))]
-      : []
+    expandedConversationIds: readIdList(record, 'expandedConversationIds'),
+    favoriteConversationIds: readIdList(record, 'favoriteConversationIds')
   };
+}
+
+export function getPersistedSidebarHostState(): SidebarHostState {
+  return readSidebarHostState();
 }
 
 export function writeSidebarHostState(state: SidebarHostState): void {
   host.setState<SidebarHostState>({
-    expandedConversationIds: [...state.expandedConversationIds]
+    expandedConversationIds: [...state.expandedConversationIds],
+    favoriteConversationIds: [...state.favoriteConversationIds]
   });
 }

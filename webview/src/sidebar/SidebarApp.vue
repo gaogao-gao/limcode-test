@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { IconAdjustmentsAlt, IconChevronRight, IconEdit, IconListDetails, IconMessage, IconPlayerStop, IconRobot, IconSettings, IconTrash } from '@tabler/icons-vue';
+import { IconAdjustmentsAlt, IconChevronRight, IconEdit, IconListDetails, IconMessage, IconPlayerStop, IconRobot, IconSettings, IconStar, IconStarFilled, IconTrash } from '@tabler/icons-vue';
 import type {
   ConversationHistoryPageInfo,
   ConversationHistoryPageRecord,
@@ -24,7 +24,8 @@ import {
   onSidebarMessage,
   postSidebarMessage,
   readSidebarHostState,
-  writeSidebarHostState
+  writeSidebarHostState,
+  getPersistedSidebarHostState
 } from './sidebarHost';
 import {
   SIDEBAR_MESSAGE,
@@ -72,6 +73,8 @@ const abortRequests = ref<Record<string, {
 }>>({});
 const operationNotice = ref<{ text: string; kind: 'info' | 'error' }>();
 const expandedConversationIds = ref<Set<string>>(new Set(readSidebarHostState().expandedConversationIds));
+const favoriteConversationIds = ref<Set<string>>(new Set(readSidebarHostState().favoriteConversationIds));
+const favoritesViewActive = ref(false);
 const projectFolders = ref<ProjectFolderCandidateRecord[]>([]);
 const activeScopeKind = ref<SidebarHistoryScopeKind>('currentProject');
 const activeProjectFolderUri = ref<string | undefined>();
@@ -85,8 +88,18 @@ const abortTarget = ref<SidebarConversationHistoryEntry>();
 const historyList = ref<HTMLElement | null>(null);
 const visibleEntries = computed(() => entries.value.filter((entry) =>
   !deletingConversationIds.value.has(entry.id) && !removedConversationIds.value.has(entry.id)
+  // 功能3:空会话不显示;但正在运行的会话即使暂无消息也保留,避免误藏进行中会话
+  && (entry.messageCount > 0 || entry.isRunning)
 ));
-const historyForest = computed(() => buildConversationHistoryForest(visibleEntries.value, originLinks.value));
+// 收藏是纯显示层:切到收藏视图时在当前已加载条目内按收藏集过滤,最近时间排序;不影响原分区排序
+const displayEntries = computed(() => {
+  if (!favoritesViewActive.value) return visibleEntries.value;
+  return visibleEntries.value
+    .filter((entry) => favoriteConversationIds.value.has(entry.id))
+    .slice()
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+});
+const historyForest = computed(() => buildConversationHistoryForest(displayEntries.value, originLinks.value));
 const originLinkByConversationId = computed(() => selectConversationOriginLinks(originLinks.value));
 const visibleHistoryNodes = computed(() => flattenVisibleHistoryNodes(historyForest.value, expandedConversationIds.value));
 const historyScrollbarRefreshKey = computed(() => `${visibleEntries.value.length}:${visibleHistoryNodes.value.length}`);
@@ -98,9 +111,10 @@ const historyCountText = computed(() => {
   return `${total} 个对话 · ${page}`;
 });
 const currentScopeLabel = computed(() => currentProjectScope.value.kind === 'unbound' ? '未绑定' : '当前项目');
-const activeScopeKey = computed(() => scopeOptionKey(activeScopeKind.value, activeProjectFolderUri.value));
+const activeScopeKey = computed(() => favoritesViewActive.value ? 'favorites' : scopeOptionKey(activeScopeKind.value, activeProjectFolderUri.value));
 const scopeOptions = computed<ScopeOption[]>(() => {
   const options: ScopeOption[] = [
+    { key: 'favorites', label: '⭐ 收藏', scopeKind: 'all' },
     { key: 'currentProject', label: currentScopeLabel.value, scopeKind: 'currentProject' },
     { key: 'all', label: '工作区全部', scopeKind: 'all' },
     { key: 'unbound', label: '未绑定', scopeKind: 'unbound' }
@@ -213,7 +227,7 @@ onMounted(() => {
     }
     if (message.type !== SIDEBAR_MESSAGE.state) return;
     historyReady.value = true;
-    const nextScopeKind = message.activeScopeKind ?? activeScopeKind.value;
+    const nextScopeKind = favoritesViewActive.value ? activeScopeKind.value : (message.activeScopeKind ?? activeScopeKind.value);
     const nextPageIdentity = historyPageIdentity(message.history);
     if (nextPageIdentity !== currentHistoryPageIdentity) {
       currentHistoryPageIdentity = nextPageIdentity;
@@ -263,6 +277,11 @@ function requestHistoryPage(
 }
 
 function switchScope(option: ScopeOption): void {
+  if (option.key === 'favorites') {
+    favoritesViewActive.value = true;
+    return; // 收藏在当前已加载条目内本地筛选,不发分页请求
+  }
+  favoritesViewActive.value = false;
   activeScopeKind.value = option.scopeKind;
   activeProjectFolderUri.value = option.projectFolderUri;
   requestHistoryPage(option.scopeKind, undefined, option.projectFolderUri);
@@ -663,9 +682,31 @@ function ensureNewActiveAgentAncestorsExpanded(): void {
 }
 
 function persistExpandedConversationIds(): void {
+  const persisted = getPersistedSidebarHostState();
   writeSidebarHostState({
-    expandedConversationIds: [...expandedConversationIds.value].sort((left, right) => left.localeCompare(right))
+    expandedConversationIds: [...expandedConversationIds.value].sort((left, right) => left.localeCompare(right)),
+    favoriteConversationIds: persisted.favoriteConversationIds
   });
+}
+
+function persistFavorites(): void {
+  const persisted = getPersistedSidebarHostState();
+  writeSidebarHostState({
+    expandedConversationIds: persisted.expandedConversationIds,
+    favoriteConversationIds: [...favoriteConversationIds.value]
+  });
+}
+
+function toggleFavorite(entry: SidebarConversationHistoryEntry): void {
+  const next = new Set(favoriteConversationIds.value);
+  if (next.has(entry.id)) next.delete(entry.id);
+  else next.add(entry.id);
+  favoriteConversationIds.value = next;
+  persistFavorites();
+}
+
+function isFavorite(entry: SidebarConversationHistoryEntry): boolean {
+  return favoriteConversationIds.value.has(entry.id);
 }
 
 function descendantAgentSummaryText(summary: ConversationHistoryDescendantAgentSummary): string {
@@ -850,6 +891,19 @@ function historyNodeStyle(node: VisibleHistoryTreeNode): Record<string, string> 
               </div>
             </div>
             <div class="history-actions" @click.stop @keydown.stop>
+              <button
+                type="button"
+                class="history-action-button"
+                :class="{ 'is-favorite': isFavorite(node.entry) }"
+                :title="isFavorite(node.entry) ? '取消收藏' : '收藏对话'"
+                :aria-label="isFavorite(node.entry) ? '取消收藏' : '收藏对话'"
+                :aria-pressed="isFavorite(node.entry)"
+                :disabled="isConversationOperationPending(node.entry)"
+                @click="toggleFavorite(node.entry)"
+              >
+                <IconStarFilled v-if="isFavorite(node.entry)" class="history-action-icon" stroke="2" aria-hidden="true" />
+                <IconStar v-else class="history-action-icon" stroke="2" aria-hidden="true" />
+              </button>
               <button type="button" class="history-action-button" title="重命名对话标题" aria-label="重命名对话标题" :disabled="isConversationOperationPending(node.entry)" @click="renameConversation(node.entry)">
                 <IconEdit class="history-action-icon" stroke="2" aria-hidden="true" />
               </button>
