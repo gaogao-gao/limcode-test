@@ -570,6 +570,10 @@ export class VscodeReliableKernelCommandRouter {
       if (!isSettingsRevisionConflictError(error)) throw error;
       const latest = await this.product.configuration.loadGlobalSettings(payload.section);
       this.broadcastOrPost(webview, this.globalSettingsSnapshot(latest));
+      if (payload.section === 'common') {
+        await this.applyCommonProxyRuntime(latest.settings as GlobalSettingsRecord)
+          .catch((proxyError) => console.warn('[LimCode] Failed to apply latest common proxy settings after conflict.', proxyError));
+      }
       this.postRequestError(
         webview,
         BridgeMessageType.GlobalSettingsUpdate,

@@ -4,6 +4,7 @@ import {
   savepoint,
   type RepositoryTransactionStep
 } from './repositories';
+import type { RuntimeDatabase } from './runtimeDatabase';
 
 const PROJECT_CONTEXT_ID_DOMAIN = 'limcode-reliable-project-context\0';
 const CONVERSATION_PROJECT_LINK_ID_DOMAIN = 'limcode-reliable-conversation-project-link\0';
@@ -69,6 +70,34 @@ export function projectFolderAssignmentSteps(input: {
     }),
     conversationProjectLinkInsertStep({ conversationId, projectContextId, now })
   ];
+}
+
+/** 读取会话绑定的主项目；无绑定返回 undefined，多于一个绑定视为 Runtime 数据损坏。 */
+export async function projectFolderForConversation(
+  database: RuntimeDatabase,
+  conversationIdInput: string
+): Promise<ProjectFolderAssignment | undefined> {
+  const conversationId = requireText(conversationIdInput, 'ConversationProjectLink.conversation_id');
+  const linkSnapshot = await database.snapshot([
+    DOMAIN_REPOSITORIES.domain('ConversationProjectLink').list({
+      where: { conversation_id: conversationId, role: 'primary' },
+      limit: 2
+    })
+  ]);
+  const links = Array.isArray(linkSnapshot.snapshot[0]) ? linkSnapshot.snapshot[0] : [];
+  if (links.length > 1) throw new Error(`Conversation ${conversationId} has multiple primary project links.`);
+  const link = links[0];
+  if (!link) return undefined;
+  const projectContextId = requireText(link.project_context_id, 'ConversationProjectLink.project_context_id');
+  const projectSnapshot = await database.snapshot([
+    DOMAIN_REPOSITORIES.domain('ProjectContext').get(projectContextId)
+  ]);
+  const project = projectSnapshot.snapshot[0];
+  if (!project || Array.isArray(project)) throw new Error(`ProjectContext ${projectContextId} does not exist.`);
+  return {
+    uri: requireText(project.uri, 'ProjectContext.uri'),
+    name: requireText(project.name, 'ProjectContext.name')
+  };
 }
 
 export function conversationProjectLinkInsertStep(input: {

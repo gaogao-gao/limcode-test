@@ -2017,7 +2017,7 @@ export const useGlobalSettingsStore = defineStore('globalSettings', {
       } else if (section === 'mcpServers') {
         const settings = value as McpServersSettingsRecord;
         this.mcpServers = { servers: [...(settings.servers ?? [])].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id)) };
-      } else this.common = value as GlobalSettingsRecord;
+      } else this.common = { ...emptyCommon(), ...(value as Partial<GlobalSettingsRecord>) };
     },
     flushDependentSettingsAfterCommittedSnapshot(payload: GlobalSettingsSnapshotPayload): void {
       if (payload.section === 'llmProviderConfigs' && this.pendingActiveProviderConfigIdAfterConfigsSave) {

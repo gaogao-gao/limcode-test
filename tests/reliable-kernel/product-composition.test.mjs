@@ -199,3 +199,11 @@ test('MCP discovery generations are cancellable and connect independent servers 
   assert.match(source, /Promise\.all\(connectable\.map/);
   assert.doesNotMatch(source, /this\.refreshing\s*=\s*this\.refreshing\.then/);
 });
+
+test('MCP proxy changes force reconnect instead of reusing an old transport', () => {
+  const source = fs.readFileSync(path.resolve('backend/application/mcpRuntimeManager.ts'), 'utf8');
+  assert.match(source, /connection\.proxy !== proxy/);
+  assert.match(source, /\.\.\.\(proxy \? \{ proxy \} : \{\}\)/);
+  assert.match(source, /bodyIdleTimeoutMs: null/);
+  assert.match(source, /overallTimeoutMs: null/);
+});

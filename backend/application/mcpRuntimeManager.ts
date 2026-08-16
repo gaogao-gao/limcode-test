@@ -9,6 +9,8 @@ import { normalizeProxySetting, proxyEnvironmentVariables } from './reliableKern
 
 interface McpConnection {
   config: McpServerConfigRecord;
+  /** 连接建立时的有效代理；代理变更必须重建连接，不能复用旧 transport。 */
+  proxy?: string;
   client: Client;
   transport: { close(): Promise<void> };
   tools: ToolDefinition[];
@@ -127,7 +129,7 @@ export class McpRuntimeManager implements McpMemoryConnectionRegistry {
     const wanted = new Map(settings.servers.map((server) => [server.id, server]));
     const obsolete = [...this.connections].filter(([id, connection]) => {
       const next = wanted.get(id);
-      return !next || !next.enabled || !sameConnectionConfig(connection.config, next);
+      return !next || !next.enabled || !sameConnectionConfig(connection.config, next) || connection.proxy !== proxy;
     });
     // Remove obsolete handles before the first await. A superseding generation must never observe
     // a connection which this generation has already committed to closing.
@@ -207,8 +209,9 @@ async function connectServer(config: McpServerConfigRecord, signal: AbortSignal,
       })
     : new StreamableHTTPClientTransport(new URL(config.transport.url), {
         requestInit: config.transport.headers ? { headers: config.transport.headers } : undefined,
-        // HTTP MCP 连接走代理，避免直连暴露本地 IP。
-        ...(proxy ? { fetch: createProxyFetch(proxy) } : {})
+        // HTTP MCP 的 standalone SSE 是长驻流，不能套用 LLM 请求的 60s idle / 15min overall deadline；
+        // 连接生命周期由 MCP SDK 的 AbortSignal 管理，代理层只保留 CONNECT 建连超时。
+        ...(proxy ? { fetch: createProxyFetch(proxy, { bodyIdleTimeoutMs: null, overallTimeoutMs: null }) } : {})
       });
   try {
     await client.connect(transport, { signal });
@@ -220,6 +223,7 @@ async function connectServer(config: McpServerConfigRecord, signal: AbortSignal,
     }]));
     return {
       config,
+      ...(proxy ? { proxy } : {}),
       client,
       transport,
       tools,

@@ -45,6 +45,7 @@ import { createEmptyClientState } from '../../shared/clientStateSchema';
 import { resolveToolPolicyLayers, type ToolPolicyLayer } from '../../shared/toolPolicyResolution';
 import {
   createLocalFolderWorkEnvironmentRecord,
+  isLocalFolderWorkEnvironment,
   workEnvironmentIdFromUri
 } from '../../shared/workEnvironmentCatalog';
 import { loadGlobalSettingsFile, writeGlobalSettingsFile } from '../capabilities/vscodeStorage/globalSettings';
@@ -303,22 +304,26 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     )]
       .filter((id) => availableWorkEnvironmentIds.includes(id))
       .sort();
+    const promptWorkEnvironments = workEnvironmentPolicy?.enabled === true
+      ? allowedWorkEnvironmentIds
+        .map((id) => records.workEnvironments.find((environment) => environment.id === id))
+        .filter((environment): environment is WorkEnvironmentRecord => !!environment)
+      // 与旧 ECS runtimeContextWorkEnvironmentsForConversation 一致：策略停用时只暴露本地 folder，
+      // 不把不可通过工具使用的 SSH/远程环境写进模型上下文。
+      : records.workEnvironments.filter((environment) =>
+          environment.available !== false && isLocalFolderWorkEnvironment(environment));
     const promptRenderContext: ReliablePromptRenderContext = {
       now: new Date(),
       platform: process.platform,
-      ...(this.currentWorkspaceFolders[0]
-        ? { workspace: { name: this.currentWorkspaceFolders[0].name, uri: this.currentWorkspaceFolders[0].uri } }
-        : {}),
-      workEnvironments: allowedWorkEnvironmentIds
-        .map((id) => records.workEnvironments.find((environment) => environment.id === id))
-        .filter((environment): environment is WorkEnvironmentRecord => !!environment),
+      ...(request.workspace ? { workspace: request.workspace } : {}),
+      workEnvironments: promptWorkEnvironments,
       agentName: agent.name,
       ...(agent.description ? { agentDescription: agent.description } : {}),
       ...(workflow
         ? { workflowName: workflow.name, ...(workflow.description ? { workflowDescription: workflow.description } : {}) }
         : {})
     };
-    const ruleFiles = await this.loadRuleFiles();
+    const ruleFiles = await this.loadRuleFiles(request.workspace);
     const renderedRuntimeContextParts = runtimeContexts
       .map((context) => {
         const text = renderReliableRuntimeContextTemplate(context.template, promptRenderContext).trim();
@@ -448,26 +453,26 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
   }
 
   /**
-   * 读取全局（<dataRoot>）与项目（第一个 workspace folder）的 AGENTS.md / CLAUDE.md。
+   * 读取全局（<dataRoot>）与会话绑定项目目录的 AGENTS.md / CLAUDE.md。
    * 与 capabilities/rulesCatalog 的路径约定一致；无 ExtensionContext（测试隔离 authority）时返回空。
    */
-  private async loadRuleFiles(): Promise<RuleFileRecord[]> {
+  private async loadRuleFiles(workspace?: { uri: string }): Promise<RuleFileRecord[]> {
     if (!this.context) return [];
-    const { readFile } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    const roots: Array<{ scope: RuleScope; rootPath: string | undefined }> = [
-      { scope: 'global', rootPath: resolveDataRootUri(this.context).fsPath },
-      { scope: 'project', rootPath: this.currentWorkspaceFolders[0]?.rootPath }
+    // 使用 VS Code FS API，远程 workspace / 非 file scheme 与 rulesCatalog 行为一致。
+    const { Uri, workspace: vscodeWorkspace } = await import('vscode');
+    const roots: Array<{ scope: RuleScope; rootUri: vscode.Uri | undefined }> = [
+      { scope: 'global', rootUri: resolveDataRootUri(this.context) },
+      { scope: 'project', rootUri: workspace ? Uri.parse(workspace.uri) : undefined }
     ];
     const rules: RuleFileRecord[] = [];
-    for (const { scope, rootPath } of roots) {
-      if (!rootPath) continue;
+    for (const { scope, rootUri } of roots) {
+      if (!rootUri) continue;
       for (const kind of ['AGENTS', 'CLAUDE'] as const) {
-        const filePath = join(rootPath, kind === 'AGENTS' ? 'AGENTS.md' : 'CLAUDE.md');
+        const fileUri = Uri.joinPath(rootUri, kind === 'AGENTS' ? 'AGENTS.md' : 'CLAUDE.md');
         let content = '';
         let exists = false;
         try {
-          content = await readFile(filePath, 'utf8');
+          content = Buffer.from(await vscodeWorkspace.fs.readFile(fileUri)).toString('utf8');
           exists = true;
         } catch {
           // 规则文件未创建（或不可读）时按「不存在」处理。
@@ -477,7 +482,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
           scope,
           kind,
           editable: kind === 'AGENTS',
-          path: filePath,
+          path: fileUri.fsPath,
           exists,
           content
         });

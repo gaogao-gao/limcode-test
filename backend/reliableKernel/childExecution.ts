@@ -11,7 +11,10 @@ import {
   parseInputTurnIntentEnvelopeText,
   TURN_INTENT_ENVELOPE_CONTENT_TYPE
 } from './guidanceIntent';
-import { conversationProjectLinkInsertStep } from './conversationProject';
+import {
+  conversationProjectLinkInsertStep,
+  projectFolderForConversation
+} from './conversationProject';
 import {
   assertChildExecutionTransition,
   childExecutionAcceptsContinuation,
@@ -312,11 +315,16 @@ export class ChildExecutionControlPlane {
       throw new Error(`Source ToolCall cannot spawn from ${String(parent.toolCall.status)}/${String(parent.toolExecution.status)}.`);
     }
 
+    const workspace = await projectFolderForConversation(
+      this.database,
+      requirePhaseFId(parent.conversation.id, 'Conversation.id')
+    );
     const compiled = normalizeCompiledTurnAuthority(await this.authorityCompiler.compile({
       conversationId: ids.childConversationId,
       turnId: ids.childTurnId,
       executorAgentId: command.childAgentId,
-      intentKind: 'input'
+      intentKind: 'input',
+      ...(workspace ? { workspace } : {})
     }), ids.childTurnId, command.childAgentId);
     const [requestContent, promptContent, authorityContent] = await Promise.all([
       this.contentStore.prepare(
@@ -1218,12 +1226,15 @@ export class ChildExecutionControlPlane {
     }
     if (agentLinks.length !== 1) throw new Error('Child Conversation must have one default Agent link.');
     const executorAgentId = requirePhaseFId(agentLinks[0].agent_id, 'AgentConversationLink.agent_id');
+    const childConversationId = requirePhaseFId(child.child_conversation_id, 'ChildExecution.child_conversation_id');
+    const workspace = await projectFolderForConversation(this.database, childConversationId);
     const compiled = normalizeCompiledTurnAuthority(await this.authorityCompiler.compile({
-      conversationId: requirePhaseFId(child.child_conversation_id, 'ChildExecution.child_conversation_id'),
+      conversationId: childConversationId,
       turnId: ids.turnId,
       executorAgentId,
       intentKind: 'continuation',
-      sourceTurnId: requirePhaseFId(previousTurn.id, 'previous Turn.id')
+      sourceTurnId: requirePhaseFId(previousTurn.id, 'previous Turn.id'),
+      ...(workspace ? { workspace } : {})
     }), ids.turnId, executorAgentId);
     const authorityContent = await this.contentStore.prepare(
       this.database,

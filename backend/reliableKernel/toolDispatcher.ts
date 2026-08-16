@@ -1536,8 +1536,14 @@ export class ReliableToolDispatcher implements ReliableAgentToolDispatcher {
     if (!host.skillDefinitions) return definitions;
     const index = definitions.findIndex((definition) => definition.declaration.name === SKILLS_TOOL_NAME);
     if (index === -1) return definitions;
-    const policy = authoritySkillPolicy(document);
-    const enabled = host.skillDefinitions().filter((skill) => isSkillEnabledByPolicy(policy, skill));
+    let enabled: SkillDefinitionRecord[];
+    try {
+      const policy = authoritySkillPolicy(document);
+      enabled = host.skillDefinitions().filter((skill) => isSkillEnabledByPolicy(policy, skill));
+    } catch {
+      // 与其他动态注入点一致：目录/冻结策略异常时降级为静态描述，不拖垮整个 Turn。
+      return definitions;
+    }
     const target = definitions[index];
     const baseDescription = typeof target.declaration.description === 'string' ? target.declaration.description : '';
     const next = [...definitions];

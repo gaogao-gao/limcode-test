@@ -44,6 +44,10 @@ import {
   type TurnRecoveryFacts,
   type TurnRecoveryJudgment
 } from './turnRecovery';
+import {
+  projectFolderForConversation,
+  type ProjectFolderAssignment
+} from './conversationProject';
 
 export const DEFAULT_AGENT_CONVERSATION_ROLE = 'default';
 
@@ -123,6 +127,8 @@ export interface TurnAuthorityCompilationRequest {
   sourceTurnId?: string;
   /** Explicit next-Turn selection captured by the UI command admission boundary. */
   modelOverride?: TurnModelOverride;
+  /** Conversation-bound workspace used only for model-visible runtime context/rule rendering. */
+  workspace?: ProjectFolderAssignment;
 }
 
 export interface TurnModelOverride {
@@ -2184,16 +2190,21 @@ export class TurnControlPlane {
     requestedExecutorAgentId?: string,
     modelOverride?: TurnModelOverride
   ): Promise<ReturnType<typeof normalizeCompiledTurnAuthority>> {
+    const [defaultAgent, workspace] = await Promise.all([
+      requestedExecutorAgentId ? Promise.resolve(undefined) : this.getDefaultAgent(conversationId),
+      projectFolderForConversation(this.database, conversationId)
+    ]);
     const executorAgentId = requestedExecutorAgentId
       ? requireId(requestedExecutorAgentId, 'TurnExecutionCommand.executorAgentId')
-      : requireId((await this.getDefaultAgent(conversationId)).agent_id, 'AgentConversationLink.agent_id');
+      : requireId(defaultAgent?.agent_id, 'AgentConversationLink.agent_id');
     return normalizeCompiledTurnAuthority(await this.authorityCompiler.compile({
       conversationId,
       turnId,
       executorAgentId,
       intentKind,
       ...(sourceTurnId ? { sourceTurnId: requireId(sourceTurnId, 'sourceTurnId') } : {}),
-      ...(modelOverride ? { modelOverride } : {})
+      ...(modelOverride ? { modelOverride } : {}),
+      ...(workspace ? { workspace } : {})
     }), turnId, executorAgentId);
   }
 

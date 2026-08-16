@@ -19,8 +19,10 @@ const DEFAULT_OVERALL_TIMEOUT_MS = 15 * 60 * 1_000;
 
 export interface ProxyFetchTimeoutOptions {
   connectTimeoutMs?: number;
-  bodyIdleTimeoutMs?: number;
-  overallTimeoutMs?: number;
+  /** null 显式禁用 body idle deadline；长驻 SSE 等流式连接由调用方 AbortSignal 管理。 */
+  bodyIdleTimeoutMs?: number | null;
+  /** null 显式禁用整体 deadline；缺省仍是 LLM 请求适用的 15 分钟上限。 */
+  overallTimeoutMs?: number | null;
 }
 
 export type ProxyFetchFailurePhase = 'connect' | 'response_body' | 'response';
@@ -42,14 +44,14 @@ export class ProxyFetchTransportError extends Error {
 
 interface ResolvedProxyFetchTimeouts {
   connectTimeoutMs: number;
-  bodyIdleTimeoutMs: number;
-  overallTimeoutMs: number;
+  bodyIdleTimeoutMs?: number;
+  overallTimeoutMs?: number;
 }
 
 interface ResponseDeadlineOptions {
-  bodyIdleTimeoutMs: number;
-  overallTimeoutMs: number;
-  overallDeadlineAt: number;
+  bodyIdleTimeoutMs?: number;
+  overallTimeoutMs?: number;
+  overallDeadlineAt?: number;
   method: string;
 }
 
@@ -98,11 +100,13 @@ export function createProxyFetch(
 
     const signal = init?.signal ?? inputRequest?.signal;
     throwIfAborted(signal);
-    const overallDeadlineAt = Date.now() + timeouts.overallTimeoutMs;
+    const overallDeadlineAt = timeouts.overallTimeoutMs === undefined
+      ? undefined
+      : Date.now() + timeouts.overallTimeoutMs;
     const socket = await connectThroughProxy(targetUrl, proxyParsed, signal, {
       connectTimeoutMs: timeouts.connectTimeoutMs,
-      overallTimeoutMs: timeouts.overallTimeoutMs,
-      overallDeadlineAt
+      ...(timeouts.overallTimeoutMs !== undefined ? { overallTimeoutMs: timeouts.overallTimeoutMs } : {}),
+      ...(overallDeadlineAt !== undefined ? { overallDeadlineAt } : {})
     });
 
     try {
@@ -111,9 +115,9 @@ export function createProxyFetch(
       socket.write(`${method} ${requestTarget} HTTP/1.1\r\n${headerLines.join('\r\n')}\r\n\r\n`);
       if (bodyBuffer.length > 0) socket.write(bodyBuffer);
       return await readResponse(socket, signal, {
-        bodyIdleTimeoutMs: timeouts.bodyIdleTimeoutMs,
-        overallTimeoutMs: timeouts.overallTimeoutMs,
-        overallDeadlineAt,
+        ...(timeouts.bodyIdleTimeoutMs !== undefined ? { bodyIdleTimeoutMs: timeouts.bodyIdleTimeoutMs } : {}),
+        ...(timeouts.overallTimeoutMs !== undefined ? { overallTimeoutMs: timeouts.overallTimeoutMs } : {}),
+        ...(overallDeadlineAt !== undefined ? { overallDeadlineAt } : {}),
         method
       });
     } catch (error) {
@@ -127,7 +131,7 @@ function connectThroughProxy(
   targetUrl: URL,
   proxyParsed: URL,
   signal: AbortSignal | undefined,
-  deadlines: { connectTimeoutMs: number; overallTimeoutMs: number; overallDeadlineAt: number }
+  deadlines: { connectTimeoutMs: number; overallTimeoutMs?: number; overallDeadlineAt?: number }
 ): Promise<tls.TLSSocket | net.Socket> {
   return new Promise((resolve, reject) => {
     const targetPort = targetUrl.port || (targetUrl.protocol === 'https:' ? '443' : '80');
@@ -144,8 +148,10 @@ function connectThroughProxy(
       'connect',
       deadlines.connectTimeoutMs
     )), deadlines.connectTimeoutMs);
-    const remainingOverallMs = Math.max(1, deadlines.overallDeadlineAt - Date.now());
-    const overallTimer = setTimeout(() => finishReject(new ProxyFetchTransportError(
+    const remainingOverallMs = deadlines.overallDeadlineAt === undefined
+      ? undefined
+      : Math.max(1, deadlines.overallDeadlineAt - Date.now());
+    const overallTimer = remainingOverallMs === undefined ? undefined : setTimeout(() => finishReject(new ProxyFetchTransportError(
       `Proxy request exceeded its ${deadlines.overallTimeoutMs}ms overall deadline while connecting.`,
       'LLM_TRANSPORT_TIMEOUT',
       'response',
@@ -154,7 +160,7 @@ function connectThroughProxy(
 
     const cleanup = () => {
       clearTimeout(connectTimer);
-      clearTimeout(overallTimer);
+      if (overallTimer !== undefined) clearTimeout(overallTimer);
       signal?.removeEventListener('abort', onAbort);
     };
     const destroyPending = () => {
@@ -244,8 +250,10 @@ function readResponse(
     let chunkedDone = false;
     let bodyIdleTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const remainingOverallMs = Math.max(1, deadlines.overallDeadlineAt - Date.now());
-    const overallTimer = setTimeout(() => fail(new ProxyFetchTransportError(
+    const remainingOverallMs = deadlines.overallDeadlineAt === undefined
+      ? undefined
+      : Math.max(1, deadlines.overallDeadlineAt - Date.now());
+    const overallTimer = remainingOverallMs === undefined ? undefined : setTimeout(() => fail(new ProxyFetchTransportError(
       `Proxy response exceeded its ${deadlines.overallTimeoutMs}ms overall deadline.`,
       'LLM_TRANSPORT_TIMEOUT',
       'response',
@@ -253,7 +261,7 @@ function readResponse(
     )), remainingOverallMs);
 
     const cleanup = () => {
-      clearTimeout(overallTimer);
+      if (overallTimer !== undefined) clearTimeout(overallTimer);
       if (bodyIdleTimer !== undefined) clearTimeout(bodyIdleTimer);
       bodyIdleTimer = undefined;
       signal?.removeEventListener('abort', onAbort);
@@ -284,7 +292,7 @@ function readResponse(
       try { controller?.close(); } catch { /* body already released/cancelled */ }
     };
     const armBodyIdleDeadline = () => {
-      if (lifecycleFinished) return;
+      if (lifecycleFinished || deadlines.bodyIdleTimeoutMs === undefined) return;
       if (bodyIdleTimer !== undefined) clearTimeout(bodyIdleTimer);
       bodyIdleTimer = setTimeout(() => fail(new ProxyFetchTransportError(
         `Proxy response body was idle for ${deadlines.bodyIdleTimeoutMs}ms.`,
@@ -506,9 +514,14 @@ function truncatedError(message: string): ProxyFetchTransportError {
 function resolveTimeouts(options: ProxyFetchTimeoutOptions): ResolvedProxyFetchTimeouts {
   return {
     connectTimeoutMs: positiveTimeout(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS, 'connectTimeoutMs'),
-    bodyIdleTimeoutMs: positiveTimeout(options.bodyIdleTimeoutMs, DEFAULT_BODY_IDLE_TIMEOUT_MS, 'bodyIdleTimeoutMs'),
-    overallTimeoutMs: positiveTimeout(options.overallTimeoutMs, DEFAULT_OVERALL_TIMEOUT_MS, 'overallTimeoutMs')
+    bodyIdleTimeoutMs: optionalTimeout(options.bodyIdleTimeoutMs, DEFAULT_BODY_IDLE_TIMEOUT_MS, 'bodyIdleTimeoutMs'),
+    overallTimeoutMs: optionalTimeout(options.overallTimeoutMs, DEFAULT_OVERALL_TIMEOUT_MS, 'overallTimeoutMs')
   };
+}
+
+function optionalTimeout(value: number | null | undefined, fallback: number, label: string): number | undefined {
+  if (value === null) return undefined;
+  return positiveTimeout(value, fallback, label);
 }
 
 function positiveTimeout(value: number | undefined, fallback: number, label: string): number {

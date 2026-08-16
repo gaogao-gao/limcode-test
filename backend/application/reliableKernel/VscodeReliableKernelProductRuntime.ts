@@ -383,10 +383,14 @@ export class VscodeReliableKernelProductRuntime {
         }
       });
       // shell 覆盖是显式 opt-in；开启后把代理注入扩展宿主进程环境，子孙进程
-      // （wrapper → PowerShell → curl/git）自动继承。设置保存时由 CommandRouter 重新应用。
-      void configuration.loadGlobalSettings('common')
-        .then((stored) => applyProxyEnvironment(proxyForShellAndMcp(stored.settings as GlobalSettingsRecord)))
-        .catch(() => undefined);
+      // （wrapper → PowerShell → curl/git）自动继承。这里必须在 open 返回前完成，
+      // 否则启动读到的旧值可能在用户随后的保存之后落地，反向覆盖新设置。
+      try {
+        const stored = await configuration.loadGlobalSettings('common');
+        applyProxyEnvironment(proxyForShellAndMcp(stored.settings as GlobalSettingsRecord));
+      } catch {
+        // 设置文件损坏不应阻止扩展打开；LLM 请求侧仍会读取并报告真实错误。
+      }
       return new VscodeReliableKernelProductRuntime({
         application,
         configuration,

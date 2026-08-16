@@ -21,7 +21,10 @@ const { loadRecordStore } = require('../../dist/extension/backend/capabilities/v
 const { VscodeConfigurationAuthority } = require('../../dist/extension/backend/reliableKernel/vscodeConfigurationAuthority.js');
 const { frozenCompressionPolicy } = require('../../dist/extension/backend/reliableKernel/frozenAuthority.js');
 const { resolveToolPolicyLayers } = require('../../dist/extension/shared/toolPolicyResolution.js');
-const { workEnvironmentIdFromUri } = require('../../dist/extension/shared/workEnvironmentCatalog.js');
+const {
+  createRemoteServerWorkEnvironmentRecord,
+  workEnvironmentIdFromUri
+} = require('../../dist/extension/shared/workEnvironmentCatalog.js');
 
 async function saveLatestGlobalSettings(authority, section, settings) {
   const current = await authority.loadGlobalSettings(section);
@@ -125,6 +128,11 @@ test('VscodeConfigurationAuthority 独立持久化配置记录/Link，并按 Run
     const folderUri = vscode.Uri.file(folderPath).toString();
     await authority.synchronizeWorkspaceFolders([{ uri: folderUri, name: 'Workspace', rootPath: folderPath, index: 0 }]);
     const workEnvironmentId = workEnvironmentIdFromUri(folderUri);
+    const remoteEnvironment = await authority.mutations.upsertWorkEnvironment(createRemoteServerWorkEnvironmentRecord({
+      id: 'work-env-remote-test',
+      name: 'Remote Test',
+      host: 'remote.test'
+    }));
 
     const agent = await authority.mutations.createAgent({ name: '配置 Agent', kind: 'custom' });
     const workflow = await authority.mutations.createWorkflow({ name: '可靠 Workflow' });
@@ -169,7 +177,7 @@ test('VscodeConfigurationAuthority 独立持久化配置记录/Link，并按 Run
     await authority.mutations.setRuntimeContext({
       scopeKind: 'conversation',
       scopeId: 'conversation:test',
-      template: 'RUNTIME-CONTEXT'
+      template: 'ENV:\n{{$workEnvironment.current}}'
     });
     await authority.mutations.setWorkEnvironmentPolicy({
       scopeKind: 'conversation',
@@ -212,10 +220,23 @@ test('VscodeConfigurationAuthority 独立持久化配置记录/Link，并按 Run
       frozen.systemPrompt.text,
       '[全局规则]\nGLOBAL\n\n[Agent 规则]\nAGENT\n\n[工作流规则]\nWORKFLOW\n\n[对话规则]\nCONVERSATION'
     );
-    assert.equal(frozen.runtimeContext.template, 'RUNTIME-CONTEXT');
+    assert.equal(frozen.runtimeContext.template, 'ENV:\n{{$workEnvironment.current}}');
+    assert.match(frozen.runtimeContext.text, /work-env-local-/);
+    assert.doesNotMatch(frozen.runtimeContext.text, /work-env-remote-test/);
     assert.equal(frozen.workEnvironmentPolicy.enabled, true);
     assert.deepEqual(frozen.workEnvironmentPolicy.allowedWorkEnvironmentIds, [workEnvironmentId]);
     assert.equal(frozen.workEnvironmentPolicy.defaultWorkEnvironmentId, workEnvironmentId);
+
+    await authority.mutations.clearWorkEnvironmentPolicy('conversation', 'conversation:test');
+    const withoutEnvironmentPolicy = JSON.parse((await authority.compile({
+      conversationId: 'conversation:test',
+      turnId: 'turn:no-environment-policy',
+      executorAgentId: agent.id,
+      intentKind: 'input'
+    })).authoritySnapshot.content);
+    assert.equal(withoutEnvironmentPolicy.workEnvironmentPolicy.enabled, false);
+    assert.match(withoutEnvironmentPolicy.runtimeContext.text, /work-env-local-/);
+    assert.doesNotMatch(withoutEnvironmentPolicy.runtimeContext.text, new RegExp(remoteEnvironment.id));
 
     const changedProvider = {
       ...provider,
