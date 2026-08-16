@@ -16,6 +16,7 @@ import {
   type ConversationSettingsGetPayload,
   type ConversationSettingsUpdatePayload,
   type GlobalSettingsGetPayload,
+  type GlobalSettingsRecord,
   type GlobalSettingsUpdatePayload,
   type GuidanceCancelPayload,
   type GuidanceControlResultPayload,
@@ -41,6 +42,7 @@ import { DOMAIN_REPOSITORIES, type DomainRow } from '../../reliableKernel/reposi
 import { listAllDomainRows } from '../../reliableKernel/repositoryPagination';
 import type { VscodeReliableKernelProductRuntime } from './VscodeReliableKernelProductRuntime';
 import { readVscodeSshWorkEnvironments } from './VscodeSshConfigurationReader';
+import { applyProxyEnvironment } from './proxyEnvironment';
 
 export interface VscodeReliableKernelCommandRouterOptions {
   broadcast?(message: unknown): void;
@@ -576,6 +578,10 @@ export class VscodeReliableKernelCommandRouter {
     }
     const snapshot = this.globalSettingsSnapshot(stored, correlationId);
     this.broadcastOrPost(webview, snapshot);
+    if (payload.section === 'common') {
+      // 代理设置变更即时生效：重新注入扩展宿主进程环境（shell 子孙进程继承），LLM 链路本身按请求读取。
+      applyProxyEnvironment((stored.settings as GlobalSettingsRecord).proxy);
+    }
     if (payload.section === 'mcpServers') {
       await this.product.toolHost.mcp.refreshFromSettings({ discover: true });
     }

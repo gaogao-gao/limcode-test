@@ -4,6 +4,8 @@ import type { McpServerConfigRecord, McpServersSettingsRecord, McpToolSourceReco
 import { EXTENSION_PACKAGE_NAME, EXTENSION_VERSION } from '../../shared/extensionIdentity';
 import type { ToolDefinition, ToolResultOut } from '../world/modules/tools/registry';
 import { McpInvocationError, type McpMemoryConnectionRegistry, type McpToolAnnotations } from '../reliableKernel/mcpEffects';
+import { createProxyFetch } from '../capabilities/proxyFetch';
+import { normalizeProxySetting, proxyEnvironmentVariables } from './reliableKernel/proxyEnvironment';
 
 interface McpConnection {
   config: McpServerConfigRecord;
@@ -16,6 +18,8 @@ interface McpConnection {
 
 export interface McpSettingsAuthority {
   loadGlobalSettings(section: 'mcpServers'): Promise<{ settings: unknown }>;
+  /** 可选：解析全局代理设置（common.proxy）。缺省时 MCP 连接直连。 */
+  resolveProxySetting?(): Promise<string | undefined>;
 }
 
 export class McpRuntimeManager implements McpMemoryConnectionRegistry {
@@ -114,6 +118,11 @@ export class McpRuntimeManager implements McpMemoryConnectionRegistry {
   ): Promise<void> {
     const loaded = await this.storage.loadGlobalSettings('mcpServers');
     this.requireCurrentRefresh(generation, signal);
+    // 每次刷新解析一次代理：设置变更后由 refreshFromSettings 重建连接，无需热改存量连接。
+    const proxy = this.storage.resolveProxySetting
+      ? normalizeProxySetting(await this.storage.resolveProxySetting())
+      : undefined;
+    this.requireCurrentRefresh(generation, signal);
     const settings = loaded.settings as McpServersSettingsRecord;
     const wanted = new Map(settings.servers.map((server) => [server.id, server]));
     const obsolete = [...this.connections].filter(([id, connection]) => {
@@ -149,7 +158,7 @@ export class McpRuntimeManager implements McpMemoryConnectionRegistry {
     await Promise.all(connectable.map(async (server) => {
       const connecting = connectingSourceRecord(server);
       try {
-        const connection = await connectServer(server, signal);
+        const connection = await connectServer(server, signal, proxy);
         if (!this.isCurrentRefresh(generation, signal)) {
           await closeConnection(connection);
           return;
@@ -180,7 +189,7 @@ export class McpRuntimeManager implements McpMemoryConnectionRegistry {
   }
 }
 
-async function connectServer(config: McpServerConfigRecord, signal: AbortSignal): Promise<McpConnection> {
+async function connectServer(config: McpServerConfigRecord, signal: AbortSignal, proxy?: string): Promise<McpConnection> {
   validateConnectableConfig(config);
   const { Client, getDefaultEnvironment, StdioClientTransport, StreamableHTTPClientTransport } = await loadMcpSdkRuntime();
   const client = new Client(
@@ -191,12 +200,15 @@ async function connectServer(config: McpServerConfigRecord, signal: AbortSignal)
     ? new StdioClientTransport({
         command: config.transport.command,
         args: config.transport.args,
-        env: { ...getDefaultEnvironment(), ...(config.transport.env ?? {}) },
+        // SDK 默认环境是白名单（不含代理变量）；显式注入，用户配置的 env 仍可覆盖。
+        env: { ...getDefaultEnvironment(), ...proxyEnvironmentVariables(proxy), ...(config.transport.env ?? {}) },
         cwd: config.transport.cwd,
         stderr: 'pipe'
       })
     : new StreamableHTTPClientTransport(new URL(config.transport.url), {
-        requestInit: config.transport.headers ? { headers: config.transport.headers } : undefined
+        requestInit: config.transport.headers ? { headers: config.transport.headers } : undefined,
+        // HTTP MCP 连接走代理，避免直连暴露本地 IP。
+        ...(proxy ? { fetch: createProxyFetch(proxy) } : {})
       });
   try {
     await client.connect(transport, { signal });

@@ -21,7 +21,7 @@ import {
   type ToolResultOut,
   type ToolRuntimeEvent
 } from '../../world/modules/tools/registry';
-import type { RuleFileRecord, RuleScope, SkillDefinitionRecord, ToolDefinitionRecord, WorkEnvironmentRecord } from '../../../shared/protocol';
+import type { GlobalSettingsRecord, RuleFileRecord, RuleScope, SkillDefinitionRecord, ToolDefinitionRecord, WorkEnvironmentRecord } from '../../../shared/protocol';
 import type {
   ReliableAgentToolDispatchInput,
   ReliableAgentToolPause,
@@ -81,7 +81,11 @@ export class VscodeReliableToolHost implements ReliableToolDispatcherHost {
   ) {
     this.skills = createSkillCatalogCapability(context);
     this.rules = createRulesCatalogCapability(context);
-    this.mcp = new McpRuntimeManager(configuration);
+    this.mcp = new McpRuntimeManager({
+      loadGlobalSettings: (section) => configuration.loadGlobalSettings(section),
+      resolveProxySetting: async () =>
+        ((await configuration.loadGlobalSettings('common')).settings as GlobalSettingsRecord).proxy
+    });
     this.mcp.setStateChangeListener(() => this.notifyStateChange());
     this.builtins = createBuiltinToolDefinitions({ command: this.commandDeclaration });
     this.filePlanner = new LocalFileToolPlanner((inputPath, authority) => this.resolveFilePath(inputPath, authority));
