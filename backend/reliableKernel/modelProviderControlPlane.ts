@@ -1666,7 +1666,9 @@ export class ModelProviderControlPlane {
         )
       };
     }
-    const task = isRecord(recipe.turnTaskCard) ? recipe.turnTaskCard : undefined;
+    const task = recipe.turnTaskCardReminderEnabled === false
+      ? undefined
+      : isRecord(recipe.turnTaskCard) ? recipe.turnTaskCard : undefined;
     const runtime = isRecord(recipe.runtimeStatusCard) ? recipe.runtimeStatusCard : undefined;
     const reminderParts = [
       typeof task?.card === 'string' && task.card.trim() ? task.card.trim() : '',

@@ -28,7 +28,9 @@ import {
   type StreamEventResult
 } from './modelProviderControlPlane';
 import {
-  readCurrentTurnTaskCard
+  readCurrentTurnTaskCard,
+  shouldInjectTurnTaskCard,
+  type TurnTaskCardReminderState
 } from './currentTurnTaskProjection';
 import { canonicalPlainJson, normalizePlainJson, type PlainJsonValue } from './plainJson';
 import { DOMAIN_REPOSITORIES, type DomainRow } from './repositories';
@@ -216,6 +218,11 @@ interface FrozenCurrentTurnInputReference {
   contentObjectId: string;
   estimatedTokens: number;
   reinject: boolean;
+}
+
+interface CurrentTurnRequestState {
+  reference?: FrozenCurrentTurnInputReference;
+  compressionBoundaryId?: string;
 }
 
 interface FrozenRuntimeStatusCard {
@@ -611,32 +618,70 @@ export class ReliableAgentLoop {
     headRootId: string;
     tools: readonly ReliableAgentToolDefinition[];
   }): Promise<PlainJsonValue> {
-    const [currentTurnInput, runtimeStatusCard] = await Promise.all([
+    const [currentTurnState, runtimeStatusCard, turnTaskCard, previousTaskCard] = await Promise.all([
       this.readCurrentTurnInputReference(input.turnId, input.headRootId),
-      this.readRuntimeStatusCard(input.turnId)
+      this.readRuntimeStatusCard(input.turnId),
+      readCurrentTurnTaskCard(this.database, this.contentStore, input.turnId),
+      this.readPreviousTaskCardReminderStateForRound(input.turnId, input.round)
     ]);
-    const turnTaskCard = await readCurrentTurnTaskCard(
-      this.database,
-      this.contentStore,
-      input.turnId
-    );
+    const boundaryKey = currentTurnState.compressionBoundaryId ?? 'pre-compression';
+    const turnTaskCardReminderEnabled = turnTaskCard
+      ? shouldInjectTurnTaskCard({
+          revision: turnTaskCard.revision,
+          cardSha256: turnTaskCard.cardSha256,
+          boundaryKey
+        }, previousTaskCard)
+      : false;
     return normalizePlainJson({
       kind: 'reliable-agent-turn',
       projectionRevision: '2026-08-09',
       round: input.round,
       tools: input.tools,
-      ...(currentTurnInput ? { currentTurnInput } : {}),
-      ...(turnTaskCard ? { turnTaskCard } : {}),
+      ...(currentTurnState.reference ? { currentTurnInput: currentTurnState.reference } : {}),
+      ...(turnTaskCard ? {
+        turnTaskCard,
+        turnTaskCardBoundaryKey: boundaryKey,
+        turnTaskCardReminderEnabled
+      } : {}),
       ...(runtimeStatusCard ? { runtimeStatusCard } : {})
     }, 'Reliable Agent recipe');
+  }
+
+  private async readPreviousTaskCardReminderStateForRound(
+    turnId: string,
+    round: string
+  ): Promise<TurnTaskCardReminderState | undefined> {
+    const currentRound = requirePositiveInteger(round, 'ModelRequest recipe.round');
+    if (currentRound <= 1n) return undefined;
+    const previousId = modelRequestIdFor(
+      turnId,
+      `agent-loop:${turnId}:round:${(currentRound - 1n).toString()}`
+    );
+    const previousRequest = await this.maybeGet('ModelRequest', previousId);
+    if (!previousRequest) return undefined;
+    const recipe = (await this.readModelRequestRecipes([previousRequest])).get(previousId);
+    if (!recipe || recipe.kind !== 'reliable-agent-turn') return undefined;
+    const task = asRecord(recipe.turnTaskCard);
+    const revision = typeof task?.revision === 'string' ? task.revision : undefined;
+    const cardSha256 = typeof task?.cardSha256 === 'string' ? task.cardSha256 : undefined;
+    const boundaryKey = typeof recipe.turnTaskCardBoundaryKey === 'string'
+      ? recipe.turnTaskCardBoundaryKey
+      : 'pre-compression';
+    if (!revision || !cardSha256) return undefined;
+    return { revision, cardSha256, boundaryKey };
   }
 
   private async readCurrentTurnInputReference(
     turnId: string,
     headRootId: string
-  ): Promise<FrozenCurrentTurnInputReference | undefined> {
+  ): Promise<CurrentTurnRequestState> {
+    const current = await this.context.materializeStructure(requireId(headRootId, 'headRootId'));
+    const firstSegment = current.records[0]?.segment;
+    const compressionBoundaryId = firstSegment?.segment_kind === 'compression'
+      ? requireId(firstSegment.id, 'ContextSegment.id')
+      : undefined;
     const inputLinks = await this.list('MessageTurnLink', { turn_id: turnId, role: 'input' }, 2);
-    if (inputLinks.length === 0) return undefined;
+    if (inputLinks.length === 0) return { compressionBoundaryId };
     if (inputLinks.length !== 1) throw new Error(`Turn ${turnId} must have at most one input Message.`);
     const messageId = requireId(inputLinks[0].message_id, 'MessageTurnLink.message_id');
     const currentLinks = await this.list('MessageCurrentRevisionLink', { message_id: messageId }, 2);
@@ -656,7 +701,6 @@ export class ReliableAgentLoop {
       throw new Error(`Current input revision ${messageRevisionId} conflicts with Turn ${turnId}.`);
     }
     const sources = rows(snapshot.snapshot[1]);
-    const current = await this.context.materializeStructure(requireId(headRootId, 'headRootId'));
     const currentSegmentIds = new Set(current.records.map((record) =>
       requireId(record.segment.id, 'ContextSegment.id')
     ));
@@ -667,12 +711,15 @@ export class ReliableAgentLoop {
     const contentObject = await this.requireExisting('ContentObject', contentObjectId) as unknown as ContentObjectMetadata;
     const content = await this.contentStore.read(contentObject);
     return {
-      kind: 'current_turn_input',
-      messageId,
-      messageRevisionId,
-      contentObjectId,
-      estimatedTokens: estimateStoredMessageContentTokens(content, contentObject.content_type),
-      reinject: !presentInCurrentWindow
+      ...(compressionBoundaryId ? { compressionBoundaryId } : {}),
+      reference: {
+        kind: 'current_turn_input',
+        messageId,
+        messageRevisionId,
+        contentObjectId,
+        estimatedTokens: estimateStoredMessageContentTokens(content, contentObject.content_type),
+        reinject: !presentInCurrentWindow
+      }
     };
   }
 

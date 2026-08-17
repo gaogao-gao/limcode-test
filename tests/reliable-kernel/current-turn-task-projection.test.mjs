@@ -13,6 +13,7 @@ const {
   estimateTurnTaskCardTokens,
   freezeCurrentTurnTaskCard,
   readCurrentTurnTaskCard,
+  shouldInjectTurnTaskCard,
   taskListOperationFromSettledArtifact
 } = require(path.join(compiledRoot, 'backend/reliableKernel/currentTurnTaskProjection.js'));
 const {
@@ -32,6 +33,19 @@ const fact = (callSeq, operation, options = {}) => ({
   operation,
   ...(options.planApproved === true ? { planApproved: true } : {}),
   sourceMessageId: `message-${callSeq}`
+});
+
+test('task card reminder 只在任务快照或压缩边界变化时注入', () => {
+  const unchanged = {
+    revision: '2:task-call-2',
+    cardSha256: 'same-card',
+    boundaryKey: 'compression-segment-1'
+  };
+  assert.equal(shouldInjectTurnTaskCard(unchanged, undefined), true);
+  assert.equal(shouldInjectTurnTaskCard(unchanged, { ...unchanged }), false);
+  assert.equal(shouldInjectTurnTaskCard({ ...unchanged, revision: '3:task-call-3' }, unchanged), true);
+  assert.equal(shouldInjectTurnTaskCard({ ...unchanged, cardSha256: 'changed-card' }, unchanged), true);
+  assert.equal(shouldInjectTurnTaskCard({ ...unchanged, boundaryKey: 'compression-segment-2' }, unchanged), true);
 });
 
 test('task operation 只在一个严格边界规范化完整 mode/items', () => {

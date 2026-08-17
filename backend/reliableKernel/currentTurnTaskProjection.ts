@@ -58,6 +58,23 @@ export interface CurrentTurnTaskProjection extends FrozenTurnTaskCard {
   snapshot: TaskListSnapshotView;
 }
 
+export interface TurnTaskCardReminderState {
+  revision: string;
+  cardSha256: string;
+  boundaryKey: string;
+}
+
+/** Decide whether the volatile task reminder must be rendered for a new ModelRequest. */
+export function shouldInjectTurnTaskCard(
+  current: TurnTaskCardReminderState,
+  previous: TurnTaskCardReminderState | undefined
+): boolean {
+  return !previous
+    || current.revision !== previous.revision
+    || current.cardSha256 !== previous.cardSha256
+    || current.boundaryKey !== previous.boundaryKey;
+}
+
 interface TaskArtifactEnvelope {
   toolCallId: string;
   status: string;
