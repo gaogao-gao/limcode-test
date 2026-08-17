@@ -442,6 +442,151 @@ async function checkConversationForkLinks() {
     assert.equal(failedTargetTermination.reason, 'provider_failed_before_output');
     assertions.push('完整failed Turn无需final-output fence即可保留真实终态；只有被边界裁断的Turn降级');
 
+    // Regression: a fork boundary after a terminal ModelRequest copies the historical
+    // request/operation/attempt rows through the trusted historicalCopy channel instead of
+    // crashing on the creation invariant "ModelRequest insert must start prepared and non-terminal.".
+    const mrSeed = await seedParent(ctx, 'fork-terminal-model-request');
+    const mrRecipe = await ctx.store.ingest(ctx.database, 'fork-mr-recipe', 'application/json');
+    const mrOutput = await ctx.store.ingest(ctx.database, 'fork-mr-output', 'text/plain');
+    await ctx.database.transaction([
+      kernel.DOMAIN_REPOSITORIES.domain('ModelRequest').insert({
+        id: 'fork-mr-request',
+        turn_id: mrSeed.turnId,
+        request_seq: 1n,
+        status: 'prepared',
+        terminal_state: null,
+        provider_id: 'fork-mr-provider',
+        model_id: 'fork-mr-model',
+        context_window_tokens: 128000n,
+        compression_threshold_tokens: 100000n,
+        estimated_context_tokens: 1000n,
+        authority_snapshot_id: 'fork-mr-authority',
+        settings_snapshot_object_id: null,
+        recipe_object_id: mrRecipe.id,
+        usage_json: null,
+        stream_stats_json: { attemptSeq: '1', socketGeneration: '0', retryReason: null },
+        created_at: NOW,
+        updated_at: NOW
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('Operation').insert({
+        id: 'fork-mr-operation',
+        owner_kind: 'model_request',
+        owner_id: 'fork-mr-request',
+        operation_seq: 1n,
+        tool_call_id: null,
+        status: 'pending',
+        created_at: NOW,
+        updated_at: NOW
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('Attempt').insert({
+        id: 'fork-mr-attempt',
+        operation_id: 'fork-mr-operation',
+        attempt_seq: 1n,
+        status: 'pending',
+        created_at: NOW,
+        updated_at: NOW,
+        completed_at: null
+      })
+    ]);
+    // failed 终结无需 ModelStreamFence（completed 才要求终结 fence），聚合一致性同样覆盖复制路径。
+    await ctx.database.transaction([
+      kernel.DOMAIN_REPOSITORIES.domain('ModelRequest').update('fork-mr-request', {
+        status: 'terminal',
+        terminal_state: 'failed',
+        updated_at: NOW
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('Operation').update('fork-mr-operation', { status: 'failed', updated_at: NOW }),
+      kernel.DOMAIN_REPOSITORIES.domain('Attempt').update('fork-mr-attempt', {
+        status: 'failed',
+        updated_at: NOW,
+        completed_at: NOW
+      })
+    ]);
+    const mrModelContext = await context.prepareMessageAppendMutation({
+      conversationId: mrSeed.conversationId,
+      messageRevisionId: 'fork-mr-model-revision',
+      contentObjectId: mrOutput.id,
+      contentByteLength: mrOutput.byte_length
+    });
+    await ctx.database.transaction([
+      kernel.DOMAIN_REPOSITORIES.domain('Message').insert({
+        id: 'fork-mr-model-message',
+        created_at: NOW,
+        updated_at: NOW,
+        deleted_at: null
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('MessageRevision').insertWithNextSequence({
+        id: 'fork-mr-model-revision',
+        message_id: 'fork-mr-model-message',
+        role: 'model',
+        content_object_id: mrOutput.id,
+        created_at: NOW
+      }, { column: 'revision_seq', scope: { message_id: 'fork-mr-model-message' } }),
+      kernel.DOMAIN_REPOSITORIES.domain('MessageCurrentRevisionLink').insert({
+        id: 'fork-mr-model-current',
+        message_id: 'fork-mr-model-message',
+        revision_id: 'fork-mr-model-revision',
+        updated_at: NOW
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('MessagePartOfConversation').insertWithNextSequence({
+        id: 'fork-mr-model-membership',
+        conversation_id: mrSeed.conversationId,
+        message_id: 'fork-mr-model-message',
+        created_at: NOW
+      }, { column: 'message_seq', scope: { conversation_id: mrSeed.conversationId } }),
+      kernel.DOMAIN_REPOSITORIES.domain('MessageTurnLink').insert({
+        id: 'fork-mr-model-turn-link',
+        turn_id: mrSeed.turnId,
+        message_id: 'fork-mr-model-message',
+        role: 'model',
+        created_at: NOW
+      }),
+      kernel.DOMAIN_REPOSITORIES.domain('ModelRequestMessageLink').insert({
+        id: 'fork-mr-model-request-link',
+        model_request_id: 'fork-mr-request',
+        message_id: 'fork-mr-model-message',
+        created_at: NOW
+      }),
+      ...mrModelContext.steps
+    ]);
+    const mrModelSegment = (await list(ctx.database, 'ContextSegmentSource', {
+      source_kind: 'message_revision',
+      source_id: 'fork-mr-model-revision'
+    }))[0];
+    assert.ok(mrModelSegment);
+    const mrFork = await forks.fork({
+      idempotencyKey: 'fork-terminal-model-request',
+      reuseKey: 'reuse-fork-terminal-model-request',
+      sourceConversationId: mrSeed.conversationId,
+      sourceContextRootId: await context.currentHeadRootId(mrSeed.conversationId),
+      sourceContextEndSegmentId: mrModelSegment.segment_id,
+      sourceMessageRevisionId: 'fork-mr-model-revision',
+      expectedCurrentMessageRevisionId: 'fork-mr-model-revision',
+      sourceTurnId: mrSeed.turnId,
+      targetTitle: 'Fork with terminal ModelRequest',
+      targetAgentId: mrSeed.agentId
+    });
+    assert.ok(mrFork.targetConversationId);
+    const copiedRequests = (await list(ctx.database, 'ModelRequest', {}))
+      .filter((row) => row.id !== 'fork-mr-request');
+    assert.equal(copiedRequests.length, 1);
+    assert.equal(copiedRequests[0].status, 'terminal');
+    assert.equal(copiedRequests[0].terminal_state, 'failed');
+    assert.notEqual(copiedRequests[0].turn_id, mrSeed.turnId);
+    const copiedOperations = (await list(ctx.database, 'Operation', { owner_kind: 'model_request' }))
+      .filter((row) => row.id !== 'fork-mr-operation');
+    assert.equal(copiedOperations.length, 1);
+    assert.equal(copiedOperations[0].status, 'failed');
+    const copiedAttempts = (await list(ctx.database, 'Attempt', {}))
+      .filter((row) => row.operation_id === copiedOperations[0].id);
+    assert.equal(copiedAttempts.length, 1);
+    assert.equal(copiedAttempts[0].status, 'failed');
+    const copiedRequestLinks = (await list(ctx.database, 'ModelRequestMessageLink', {}))
+      .filter((row) => row.id !== 'fork-mr-model-request-link');
+    assert.equal(copiedRequestLinks.length, 1);
+    assert.equal(copiedRequestLinks[0].model_request_id, copiedRequests[0].id);
+    assertions.push('含终结ModelRequest/Operation/Attempt的历史转录经historicalCopy通道复制进fork目标，不再撞创建不变量');
+
     await assert.rejects(forks.fork({
       ...baseCommand,
       idempotencyKey: 'fork-stale',

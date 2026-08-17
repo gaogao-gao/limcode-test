@@ -675,27 +675,27 @@ function addRequestAggregate(
     status: aggregate.request.status,
     terminal_state: aggregate.request.terminal_state
   }));
-  inserts.push(DOMAIN_REPOSITORIES.domain('ModelRequest').insert({
+  inserts.push(DOMAIN_REPOSITORIES.domain('ModelRequest').insertHistoricalCopy({
     ...aggregate.request,
     id: targetRequestId,
     turn_id: mapped(turnIds, id(aggregate.request.turn_id, 'ModelRequest.turn_id'), 'Turn')
   }));
   const sourceOperationId = id(aggregate.operation.id, 'Operation.id');
   const targetOperationId = copyId(target, 'operation', sourceOperationId);
-  inserts.push(DOMAIN_REPOSITORIES.domain('Operation').insert({
+  inserts.push(DOMAIN_REPOSITORIES.domain('Operation').insertHistoricalCopy({
     ...aggregate.operation,
     id: targetOperationId,
     owner_id: targetRequestId
   }));
   for (const attempt of aggregate.attempts) {
-    inserts.push(DOMAIN_REPOSITORIES.domain('Attempt').insert({
+    inserts.push(DOMAIN_REPOSITORIES.domain('Attempt').insertHistoricalCopy({
       ...attempt,
       id: copyId(target, 'attempt', id(attempt.id, 'Attempt.id')),
       operation_id: targetOperationId
     }));
   }
   if (aggregate.fence) {
-    inserts.push(DOMAIN_REPOSITORIES.domain('ModelStreamFence').insert({
+    inserts.push(DOMAIN_REPOSITORIES.domain('ModelStreamFence').insertHistoricalCopy({
       ...aggregate.fence,
       id: copyId(target, 'model_stream_fence', id(aggregate.fence.id, 'ModelStreamFence.id')),
       model_request_id: targetRequestId

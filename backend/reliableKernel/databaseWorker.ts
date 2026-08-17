@@ -68,6 +68,7 @@ import {
 } from './clientWireData';
 import {
   DOMAIN_REPOSITORIES,
+  HISTORICAL_COPY_DOMAINS,
   assertRuntimeDomainUpdatePatch,
   type DomainRepository,
   type DomainRow,
@@ -1686,7 +1687,11 @@ function executeMutation(
   if (mutation.kind === 'pruneModelStreamCheckpoints') {
     executeCheckpointPrune(database, mutation);
   } else if (mutation.kind === 'insert') {
-    if (schema.key === 'ModelStreamCheckpoint' || schema.key === 'ModelStreamFence') {
+    const historicalCopy = mutation.historicalCopy === true;
+    if (historicalCopy && !HISTORICAL_COPY_DOMAINS.includes(schema.key)) {
+      throw new Error(`${schema.key} does not permit historical copy inserts.`);
+    }
+    if (schema.key === 'ModelStreamCheckpoint' || (schema.key === 'ModelStreamFence' && !historicalCopy)) {
       throw new Error(`${schema.key} insert is limited to the fixed writer modelStreamEvent operation.`);
     }
     const allocatedRow = mutation.allocateSequence
@@ -1694,20 +1699,34 @@ function executeMutation(
       : mutation.row;
     const row = resolveMessageRevisionSequenceReference(allocatedRow, mutation, allocatedSequences);
     if (schema.key === 'ModelRequest') {
-      if (row.status !== 'prepared' || row.terminal_state !== null) {
+      if (historicalCopy) {
+        if (row.status !== 'terminal' || row.terminal_state === null) {
+          throw new Error('Fork copy ModelRequest must be terminal with a terminal_state.');
+        }
+      } else if (row.status !== 'prepared' || row.terminal_state !== null) {
         throw new Error('ModelRequest insert must start prepared and non-terminal.');
       }
       decodeModelStreamIdentity(row.stream_stats_json);
     }
-    if (schema.key === 'Operation' && row.owner_kind === 'model_request' && row.status !== 'pending') {
-      throw new Error('ModelRequest Operation must start pending.');
+    if (schema.key === 'Operation' && row.owner_kind === 'model_request') {
+      if (historicalCopy) {
+        if (row.status === 'pending') {
+          throw new Error('Fork copy ModelRequest Operation must not be pending.');
+        }
+      } else if (row.status !== 'pending') {
+        throw new Error('ModelRequest Operation must start pending.');
+      }
     }
     if (schema.key === 'Attempt') {
       const operation = database.prepare('SELECT owner_kind FROM operation WHERE id = ?').get(row.operation_id) as {
         owner_kind?: unknown;
       } | undefined;
       if (operation?.owner_kind === 'model_request') {
-        if (row.status !== 'pending') throw new Error('ModelRequest Attempt must start pending.');
+        if (historicalCopy) {
+          if (row.status === 'pending') throw new Error('Fork copy ModelRequest Attempt must not be pending.');
+        } else if (row.status !== 'pending') {
+          throw new Error('ModelRequest Attempt must start pending.');
+        }
         if (typeof row.attempt_seq !== 'bigint' || row.attempt_seq < 1n || row.attempt_seq > 11n) {
           throw new Error('ModelRequest permits only attempt_seq 1 through 11.');
         }
