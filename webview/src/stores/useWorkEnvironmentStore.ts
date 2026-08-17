@@ -92,8 +92,10 @@ function fallbackPolicy(): WorkEnvironmentPolicyRecord | undefined {
 }
 
 function sanitizePolicyInput(allowedIds: string[], defaultId?: string): { allowed: string[]; defaultId?: string } {
-  const available = new Set(availableEnvironmentIds());
-  const allowed = uniqueAllowed(allowedIds).filter((id) => available.has(id));
+  // Use record existence instead of projected `available` to avoid revoking persisted policy
+  // entries whose `available` flag is temporarily false due to Host-scoped workspace-folder projection.
+  const existing = new Set(useClientStateStore().workEnvironments.map((environment) => environment.id));
+  const allowed = uniqueAllowed(allowedIds).filter((id) => existing.has(id));
   const resolvedDefault = defaultId && allowed.includes(defaultId) ? defaultId : allowed[0];
   return { allowed, ...(resolvedDefault ? { defaultId: resolvedDefault } : {}) };
 }

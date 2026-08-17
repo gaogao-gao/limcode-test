@@ -998,19 +998,26 @@ function projectWorkEnvironmentPolicies(
   const availableIds = new Set(
     environments.filter((environment) => environment.available).map((environment) => environment.id)
   );
-  const workspaceIds = [...currentWorkspaceFolderIds].filter((id) => availableIds.has(id));
+  // Each Host projects its own workspace folders into the allow-list and default without
+  // publishing host-local facts into the shared policy store. Folder order follows environment index.
+  const workspaceIds = environments
+    .filter((environment) => environment.available && currentWorkspaceFolderIds.has(environment.id))
+    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0) || left.id.localeCompare(right.id))
+    .map((environment) => environment.id);
   return policies.map((policy) => {
-    const configuredAvailableIds = policy.allowedWorkEnvironmentIds.filter((id) => availableIds.has(id));
-    // Preserve the former automatic local-folder fallback without publishing this Host's default
-    // into the shared policy store. Any configured environment that is usable here still wins.
-    const allowedWorkEnvironmentIds = configuredAvailableIds.length > 0 || workspaceIds.length === 0
-      ? [...policy.allowedWorkEnvironmentIds]
-      : [...new Set([...policy.allowedWorkEnvironmentIds, ...workspaceIds])];
+    // Workspace folders always join the projected allow-list so they appear checked in the editor
+    // regardless of whether the shared policy already lists them.
+    const allowedWorkEnvironmentIds = workspaceIds.length > 0
+      ? [...new Set([...workspaceIds, ...policy.allowedWorkEnvironmentIds])]
+      : [...policy.allowedWorkEnvironmentIds];
     const eligibleDefaultIds = allowedWorkEnvironmentIds.filter((id) => availableIds.has(id));
-    const defaultWorkEnvironmentId = policy.defaultWorkEnvironmentId
-      && eligibleDefaultIds.includes(policy.defaultWorkEnvironmentId)
-      ? policy.defaultWorkEnvironmentId
-      : eligibleDefaultIds[0];
+    // Prefer this Host's primary workspace folder as projected default when available;
+    // fall back to the stored policy default if it remains eligible.
+    const defaultWorkEnvironmentId = workspaceIds.length > 0
+      ? workspaceIds[0]
+      : policy.defaultWorkEnvironmentId && eligibleDefaultIds.includes(policy.defaultWorkEnvironmentId)
+        ? policy.defaultWorkEnvironmentId
+        : eligibleDefaultIds[0];
     const { defaultWorkEnvironmentId: _storedDefault, ...rest } = policy;
     return {
       ...rest,
