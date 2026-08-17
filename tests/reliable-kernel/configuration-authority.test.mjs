@@ -298,6 +298,46 @@ test('VscodeConfigurationAuthority 独立持久化配置记录/Link，并按 Run
     assert.match(withoutEnvironmentPolicy.runtimeContext.text, /work-env-local-/);
     assert.doesNotMatch(withoutEnvironmentPolicy.runtimeContext.text, new RegExp(remoteEnvironment.id));
 
+    // 子 Agent 继承父 Turn 冻结的工作环境边界：自身无策略时收敛到父边界，只收紧不放宽。
+    const childInherited = JSON.parse((await authority.compile({
+      conversationId: 'conversation:child-inherited',
+      turnId: 'turn:child-inherited',
+      executorAgentId: agent.id,
+      intentKind: 'input',
+      inheritedWorkEnvironmentPolicy: {
+        enabled: true,
+        allowedWorkEnvironmentIds: [workEnvironmentId],
+        defaultWorkEnvironmentId: workEnvironmentId
+      }
+    })).authoritySnapshot.content);
+    assert.deepEqual(childInherited.workEnvironmentPolicy.allowedWorkEnvironmentIds, [workEnvironmentId]);
+    assert.equal(childInherited.workEnvironmentPolicy.defaultWorkEnvironmentId, workEnvironmentId);
+
+    // 交集为父边界子集；父默认环境在交集内时被保留。
+    const childRemoteOnly = JSON.parse((await authority.compile({
+      conversationId: 'conversation:child-remote-only',
+      turnId: 'turn:child-remote-only',
+      executorAgentId: agent.id,
+      intentKind: 'input',
+      inheritedWorkEnvironmentPolicy: {
+        enabled: true,
+        allowedWorkEnvironmentIds: [remoteEnvironment.id],
+        defaultWorkEnvironmentId: remoteEnvironment.id
+      }
+    })).authoritySnapshot.content);
+    assert.deepEqual(childRemoteOnly.workEnvironmentPolicy.allowedWorkEnvironmentIds, [remoteEnvironment.id]);
+    assert.equal(childRemoteOnly.workEnvironmentPolicy.defaultWorkEnvironmentId, remoteEnvironment.id);
+
+    // 不携带继承边界时保持现状：无策略会话可见全部可用环境。
+    const childUnbounded = JSON.parse((await authority.compile({
+      conversationId: 'conversation:child-unbounded',
+      turnId: 'turn:child-unbounded',
+      executorAgentId: agent.id,
+      intentKind: 'input'
+    })).authoritySnapshot.content);
+    assert.deepEqual(childUnbounded.workEnvironmentPolicy.allowedWorkEnvironmentIds,
+      [remoteEnvironment.id, workEnvironmentId].sort());
+
     const changedProvider = {
       ...provider,
       modelConfigs: provider.modelConfigs.map((modelConfig) => ({

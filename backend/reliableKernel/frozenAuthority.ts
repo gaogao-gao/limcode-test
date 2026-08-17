@@ -2,6 +2,7 @@ import { ContentAddressedStore, type ContentObjectMetadata } from './contentAddr
 import { normalizePlainJson, type PlainJsonValue } from './plainJson';
 import { DOMAIN_REPOSITORIES, type DomainRow } from './repositories';
 import { RuntimeDatabase } from './runtimeDatabase';
+import type { FrozenWorkEnvironmentBoundaryPolicy } from './workEnvironmentBoundary';
 import type { ChatModelOverrideRecord, LlmCompressionConfigRecord, LlmProviderKind } from '../../shared/protocol';
 
 export interface FrozenContextProfile {
@@ -197,6 +198,30 @@ export function frozenCompressionPolicy(document: PlainJsonValue): FrozenCompres
         { enabled: true, maxRetries: 1 }
       )
     }
+  };
+}
+
+/**
+ * Work-environment boundary frozen with the Turn. Legacy snapshots predate this field and impose
+ * no inherited boundary on child executions.
+ */
+export function frozenWorkEnvironmentPolicy(document: PlainJsonValue): FrozenWorkEnvironmentBoundaryPolicy | undefined {
+  if (!isRecord(document) || document.workEnvironmentPolicy === undefined || document.workEnvironmentPolicy === null) {
+    return undefined;
+  }
+  const policy = document.workEnvironmentPolicy;
+  if (!isRecord(policy) || typeof policy.enabled !== 'boolean' || !Array.isArray(policy.allowedWorkEnvironmentIds)) {
+    throw new Error('AuthoritySnapshot workEnvironmentPolicy is incomplete.');
+  }
+  if (policy.defaultWorkEnvironmentId !== null && typeof policy.defaultWorkEnvironmentId !== 'string') {
+    throw new Error('AuthoritySnapshot workEnvironmentPolicy.defaultWorkEnvironmentId is invalid.');
+  }
+  return {
+    enabled: policy.enabled,
+    allowedWorkEnvironmentIds: policy.allowedWorkEnvironmentIds.map((value) =>
+      requireId(value, 'workEnvironmentPolicy.allowedWorkEnvironmentIds')
+    ),
+    defaultWorkEnvironmentId: policy.defaultWorkEnvironmentId as string | null
   };
 }
 

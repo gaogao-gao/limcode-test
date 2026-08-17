@@ -48,6 +48,7 @@ import {
   isLocalFolderWorkEnvironment,
   workEnvironmentIdFromUri
 } from '../../shared/workEnvironmentCatalog';
+import type { FrozenWorkEnvironmentBoundaryPolicy } from './workEnvironmentBoundary';
 import { loadGlobalSettingsFile, writeGlobalSettingsFile } from '../capabilities/vscodeStorage/globalSettings';
 import {
   loadLlmCompressionConfigsSettings,
@@ -327,8 +328,14 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     )]
       .filter((id) => availableWorkEnvironmentIds.includes(id))
       .sort();
+    const { allowedWorkEnvironmentIds: effectiveAllowedWorkEnvironmentIds, inheritedDefaultWorkEnvironmentId } =
+      applyInheritedWorkEnvironmentBoundary(
+        allowedWorkEnvironmentIds,
+        request.inheritedWorkEnvironmentPolicy,
+        availableWorkEnvironmentIds
+      );
     const promptWorkEnvironments = workEnvironmentPolicy?.enabled === true
-      ? allowedWorkEnvironmentIds
+      ? effectiveAllowedWorkEnvironmentIds
         .map((id) => records.workEnvironments.find((environment) => environment.id === id))
         .filter((environment): environment is WorkEnvironmentRecord => !!environment)
       // 与旧 ECS runtimeContextWorkEnvironmentsForConversation 一致：策略停用时只暴露本地 folder，
@@ -361,13 +368,13 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       link.conversationId === request.conversationId && link.role === 'active'
     ));
     const preferredWorkEnvironmentId = selectedEnvironment?.workEnvironmentId
-      && allowedWorkEnvironmentIds.includes(selectedEnvironment.workEnvironmentId)
+      && effectiveAllowedWorkEnvironmentIds.includes(selectedEnvironment.workEnvironmentId)
       ? selectedEnvironment.workEnvironmentId
-      : workEnvironmentPolicy?.defaultWorkEnvironmentId;
+      : workEnvironmentPolicy?.defaultWorkEnvironmentId ?? inheritedDefaultWorkEnvironmentId ?? undefined;
     const defaultWorkEnvironmentId = preferredWorkEnvironmentId
-      && allowedWorkEnvironmentIds.includes(preferredWorkEnvironmentId)
+      && effectiveAllowedWorkEnvironmentIds.includes(preferredWorkEnvironmentId)
       ? preferredWorkEnvironmentId
-      : allowedWorkEnvironmentIds[0] ?? null;
+      : effectiveAllowedWorkEnvironmentIds[0] ?? null;
 
     const executionPreset = {
       kind: 'turn-execution-preset',
@@ -432,7 +439,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       workEnvironmentPolicy: {
         id: workEnvironmentPolicy?.id ?? null,
         enabled: workEnvironmentPolicy?.enabled ?? false,
-        allowedWorkEnvironmentIds,
+        allowedWorkEnvironmentIds: effectiveAllowedWorkEnvironmentIds,
         defaultWorkEnvironmentId
       }
     };
@@ -959,6 +966,28 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     };
   }
 
+}
+
+/**
+ * Child executions inherit the parent Turn's frozen work-environment boundary: the child's own
+ * scoped allow-list is intersected with the parent's, never widened. An empty intersection fails
+ * safe to the parent boundary instead of silently re-widening.
+ */
+function applyInheritedWorkEnvironmentBoundary(
+  allowed: readonly string[],
+  inherited: FrozenWorkEnvironmentBoundaryPolicy | undefined,
+  availableIds: readonly string[]
+): { allowedWorkEnvironmentIds: string[]; inheritedDefaultWorkEnvironmentId: string | null } {
+  if (!inherited) {
+    return { allowedWorkEnvironmentIds: [...allowed], inheritedDefaultWorkEnvironmentId: null };
+  }
+  const inheritedAllowed = [...new Set(inherited.allowedWorkEnvironmentIds)]
+    .filter((id) => availableIds.includes(id));
+  const intersected = allowed.filter((id) => inheritedAllowed.includes(id));
+  return {
+    allowedWorkEnvironmentIds: [...new Set(intersected.length > 0 ? intersected : inheritedAllowed)].sort(),
+    inheritedDefaultWorkEnvironmentId: inherited.defaultWorkEnvironmentId
+  };
 }
 
 function projectWorkEnvironmentPolicies(

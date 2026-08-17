@@ -48,6 +48,7 @@ import {
   projectFolderForConversation,
   type ProjectFolderAssignment
 } from './conversationProject';
+import type { FrozenWorkEnvironmentBoundaryPolicy } from './workEnvironmentBoundary';
 
 export const DEFAULT_AGENT_CONVERSATION_ROLE = 'default';
 
@@ -135,6 +136,11 @@ export interface TurnAuthorityCompilationRequest {
   modelFallback?: TurnModelOverride;
   /** Conversation-bound workspace used only for model-visible runtime context/rule rendering. */
   workspace?: ProjectFolderAssignment;
+  /**
+   * Parent Turn's frozen work-environment boundary, supplied by child executions. The compiler
+   * intersects it with the child's own scoped policy — the boundary is never widened.
+   */
+  inheritedWorkEnvironmentPolicy?: FrozenWorkEnvironmentBoundaryPolicy;
 }
 
 export interface TurnModelOverride {

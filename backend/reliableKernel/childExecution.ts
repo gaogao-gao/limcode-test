@@ -30,7 +30,8 @@ import {
   type ToolOutcomeStatus,
   type ToolTerminalResult
 } from './effectControlPlane';
-import { frozenModelSelection, readFrozenTurnAuthority } from './frozenAuthority';
+import { frozenModelSelection, frozenWorkEnvironmentPolicy, readFrozenTurnAuthority } from './frozenAuthority';
+import type { FrozenWorkEnvironmentBoundaryPolicy } from './workEnvironmentBoundary';
 import { canonicalPlainJson } from './plainJson';
 import {
   isTransactionAssertionFailure,
@@ -355,13 +356,17 @@ export class ChildExecutionControlPlane {
       this.database,
       requirePhaseFId(parent.conversation.id, 'Conversation.id')
     );
+    const inheritedBoundary = await this.frozenWorkEnvironmentPolicyForTurn(
+      requirePhaseFId(parent.turn.id, 'parent Turn.id')
+    );
     const compiled = normalizeCompiledTurnAuthority(await this.authorityCompiler.compile({
       conversationId: ids.childConversationId,
       turnId: ids.childTurnId,
       executorAgentId: command.childAgentId,
       intentKind: 'input',
       modelFallback: command.modelFallback,
-      ...(workspace ? { workspace } : {})
+      ...(workspace ? { workspace } : {}),
+      ...(inheritedBoundary ? { inheritedWorkEnvironmentPolicy: inheritedBoundary } : {})
     }), ids.childTurnId, command.childAgentId);
     const modelSelection = frozenModelSelection(JSON.parse(asUtf8Text(
       compiled.authoritySnapshot.content,
@@ -638,6 +643,22 @@ export class ChildExecutionControlPlane {
       turnId
     );
     return frozenModelSelection(frozen.document);
+  }
+
+  /** Reads the immutable work-environment boundary frozen for one Turn; absent on legacy snapshots. */
+  public async frozenWorkEnvironmentPolicyForTurn(
+    turnIdInput: string
+  ): Promise<FrozenWorkEnvironmentBoundaryPolicy | undefined> {
+    const turnId = requirePhaseFId(turnIdInput, 'turnId');
+    const snapshots = await this.listRows('AuthoritySnapshot', { turn_id: turnId }, 2);
+    if (snapshots.length !== 1) throw new Error(`Turn ${turnId} must have exactly one AuthoritySnapshot.`);
+    const frozen = await readFrozenTurnAuthority(
+      this.database,
+      this.contentStore,
+      requirePhaseFId(snapshots[0].id, 'AuthoritySnapshot.id'),
+      turnId
+    );
+    return frozenWorkEnvironmentPolicy(frozen.document);
   }
 
   public recordSpawnReceipt(input: {
@@ -1292,13 +1313,17 @@ export class ChildExecutionControlPlane {
     const executorAgentId = requirePhaseFId(agentLinks[0].agent_id, 'AgentConversationLink.agent_id');
     const childConversationId = requirePhaseFId(child.child_conversation_id, 'ChildExecution.child_conversation_id');
     const workspace = await projectFolderForConversation(this.database, childConversationId);
+    const inheritedBoundary = await this.frozenWorkEnvironmentPolicyForTurn(
+      requirePhaseFId(previousTurn.id, 'previous Turn.id')
+    );
     const compiled = normalizeCompiledTurnAuthority(await this.authorityCompiler.compile({
       conversationId: childConversationId,
       turnId: ids.turnId,
       executorAgentId,
       intentKind: 'continuation',
       sourceTurnId: requirePhaseFId(previousTurn.id, 'previous Turn.id'),
-      ...(workspace ? { workspace } : {})
+      ...(workspace ? { workspace } : {}),
+      ...(inheritedBoundary ? { inheritedWorkEnvironmentPolicy: inheritedBoundary } : {})
     }), ids.turnId, executorAgentId);
     const authorityContent = await this.contentStore.prepare(
       this.database,
