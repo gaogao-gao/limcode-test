@@ -139,7 +139,9 @@ async function hasApprovedPlanBeforeCall(
       'submit_plan result artifact'
     );
     const detail = requireUnknownRecord(body.detail, 'submit_plan result artifact.detail');
-    if (body.toolCallId === call.id && body.status === 'succeeded' && detail.status === 'approved') return true;
+    // Ownership comes from the tool_call_id these rows were queried by; the body's copy is frozen in
+    // an immutable CAS object and still names the pre-fork call after a conversation fork.
+    if (body.status === 'succeeded' && detail.status === 'approved') return true;
   }
   const lineage = optionalRecord(authority.retryLineage);
   const inheritedToolCallId = optionalId(lineage?.inheritedPlanApprovalToolCallId);
@@ -193,7 +195,8 @@ async function isApprovedPlanResult(
     'submit_plan result artifact'
   );
   const detail = requireUnknownRecord(body.detail, 'submit_plan result artifact.detail');
-  return body.toolCallId === toolCallId && body.status === 'succeeded' && detail.status === 'approved';
+  // Same rationale as above: the immutable body copy cannot be remapped by a fork.
+  return body.status === 'succeeded' && detail.status === 'approved';
 }
 
 async function requireExistingRow(database: RuntimeDatabase, domain: string, id: string): Promise<DomainRow> {

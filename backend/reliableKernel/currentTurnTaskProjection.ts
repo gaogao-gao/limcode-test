@@ -363,9 +363,12 @@ function cloneOperationFact(fact: CurrentTurnTaskOperationFact): CurrentTurnTask
 function taskArtifactEnvelope(value: unknown, expectedToolCallId: string): TaskArtifactEnvelope {
   const record = asRecord(value);
   if (!record) throw new Error(`ToolResultArtifact ${expectedToolCallId} content is not an object.`);
-  if (record.toolCallId !== expectedToolCallId) {
-    throw new Error(`ToolResultArtifact ${expectedToolCallId} identifies another ToolCall.`);
-  }
+  // The artifact body carries a redundant copy of its originating ToolCall.id. Forking remaps the
+  // ToolResultArtifact row onto a freshly minted tool_call id, but the CAS object it points at is
+  // content-addressed and therefore immutable, so the embedded copy keeps naming the source call.
+  // Ownership is already established by the tool_call_id column these rows were queried by, and the
+  // value below is taken from the parameter rather than the body, so comparing them only rejects
+  // legitimately forked conversations.
   if (typeof record.status !== 'string') throw new Error(`ToolResultArtifact ${expectedToolCallId} has no status.`);
   return { toolCallId: expectedToolCallId, status: record.status, detail: record.detail };
 }

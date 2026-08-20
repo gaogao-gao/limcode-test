@@ -2472,7 +2472,10 @@ export class TurnControlPlane {
     const detail = body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)
       ? body.detail as Record<string, unknown>
       : undefined;
-    return body.toolCallId === toolCallId && body.status === 'succeeded' && detail?.status === 'approved';
+    // The body's toolCallId is a redundant copy frozen inside an immutable CAS object, so a forked
+    // conversation keeps naming the pre-fork call even though the row was queried by tool_call_id.
+    // Comparing them would silently drop plan approvals after a fork.
+    return body.status === 'succeeded' && detail?.status === 'approved';
   }
 
   private async editMessage(commandInput: TurnEditCommand): Promise<TurnCommandResult> {
