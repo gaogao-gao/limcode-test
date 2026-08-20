@@ -1086,9 +1086,10 @@ export class TurnControlPlane {
     if (status !== TURN_STATUS_ACTIVE && status !== TURN_STATUS_TERMINATED) {
       throw new Error(`Turn ${id} has unsupported recovery status ${status}.`);
     }
+    const now = this.timestamp();
     const facts: TurnRecoveryFacts = {
       turnStatus: status,
-      executionLeaseExists: rows(snapshot.snapshot[1]).length > 0,
+      executionLeaseExists: rows(snapshot.snapshot[1]).some((lease) => isLiveLease(lease, now)),
       pendingTurnInputExists: rows(snapshot.snapshot[2]).length > 0,
       turnTerminationExists: rows(snapshot.snapshot[3]).length > 0
     };
@@ -3508,8 +3509,9 @@ export class TurnControlPlane {
         limit: 1
       })
     ]);
+    const now = this.timestamp();
     return (
-      rows(snapshot.snapshot[0]).length > 0
+      rows(snapshot.snapshot[0]).some((lease) => isLiveLease(lease, now))
       || rows(snapshot.snapshot[1]).length > 0
       || rows(snapshot.snapshot[2]).length > 0
     );
@@ -4285,4 +4287,13 @@ function isLeaseAdmissionConflict(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes('UNIQUE constraint failed: execution_lease.conversation_id')
     || message.includes('UNIQUE constraint failed: execution_lease.turn_id');
+}
+
+/**
+ * An expired ExecutionLease means its holder is already gone, so it must not keep a Turn pinned in
+ * the executing state: recovery would otherwise keep resuming a zombie Turn, and the conversation
+ * would stay locked behind a lease nobody owns.
+ */
+function isLiveLease(lease: DomainRow, now: string): boolean {
+  return Date.parse(requireTimestamp(lease.expires_at, 'ExecutionLease.expires_at')) > Date.parse(now);
 }
