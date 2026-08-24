@@ -1795,6 +1795,19 @@ interface SemanticContentsProjection {
 }
 
 const ATTACHMENT_OBSERVATION_TARGET_TOKENS = 1_024;
+// Attachment observation runs one Provider call per media body and must survive
+// reasoning-heavy models that spend part of the output budget on thoughts.
+// Kept local on purpose: SUMMARY_PROVIDER_MIN_OUTPUT_TOKENS is shared with the
+// generic summary floor and the truncation retry step, so widening it there
+// would change unrelated compression paths.
+const ATTACHMENT_OBSERVATION_MAX_OUTPUT_TOKENS = 8_192;
+const ATTACHMENT_OBSERVATION_MAX_SUMMARY_CHARS = 8_000;
+const ATTACHMENT_OBSERVATION_MAX_ITEM_CHARS = 2_000;
+const ATTACHMENT_OBSERVATION_MAX_SALIENT_FACTS = 32;
+const ATTACHMENT_OBSERVATION_MAX_UNCERTAINTIES = 16;
+// Structured-output wobble is random, so one reformulated attempt recovers most
+// failures that previously aborted the entire compression turn.
+const ATTACHMENT_OBSERVATION_MAX_ATTEMPTS = 2;
 
 export class LlmMediaSemanticsUnavailableError extends Error {
   public readonly code = 'media_semantics_unavailable';
@@ -2121,25 +2134,40 @@ async function analyzeCompressionAttachment(
     preparation,
     signal
   );
-  const call = buildAttachmentObservationProviderCall(
-    requirement,
-    providerMedia
-  );
-  const response = await executeSummaryProviderCall(
-    provider,
-    call.request,
-    signal,
-    { allowCompatibilityRetry: false }
-  );
-  try {
-    return parseAttachmentObservationResponse(response, requirement.attachmentRef);
-  } catch (error) {
-    throw new LlmMediaSemanticsUnavailableError(
-      'the analysis Provider did not return the required structured observation.',
-      requirement.attachmentRef,
-      error
+  let lastError: unknown;
+  for (let attempt = 0; attempt < ATTACHMENT_OBSERVATION_MAX_ATTEMPTS; attempt += 1) {
+    const correction = lastError === undefined
+      ? undefined
+      : (lastError instanceof Error ? lastError.message : String(lastError)).slice(0, 300);
+    const call = buildAttachmentObservationProviderCall(
+      requirement,
+      providerMedia,
+      correction
     );
+    // Compatibility retry stays enabled so a truncated reply can grow its output
+    // budget instead of failing the turn outright.
+    const response = await executeSummaryProviderCall(
+      provider,
+      call.request,
+      signal
+    );
+    try {
+      return parseAttachmentObservationResponse(response, requirement.attachmentRef);
+    } catch (error) {
+      lastError = error;
+      logCompressionDebug('provider.compact.observation.parseRetry', {
+        attachmentRef: requirement.attachmentRef,
+        attempt: attempt + 1,
+        maxAttempts: ATTACHMENT_OBSERVATION_MAX_ATTEMPTS,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
+  throw new LlmMediaSemanticsUnavailableError(
+    'the analysis Provider did not return the required structured observation.',
+    requirement.attachmentRef,
+    lastError
+  );
 }
 
 async function prepareAttachmentObservationMedia(
@@ -2190,14 +2218,21 @@ async function prepareAttachmentObservationMedia(
 
 function buildAttachmentObservationProviderCall(
   requirement: LlmAttachmentObservationRequirement,
-  media: InlineDataPart
+  media: InlineDataPart,
+  correction?: string
 ): SummaryProviderCall {
   const systemPrompt = [
     `Attachment observation contract revision: ${ATTACHMENT_OBSERVATION_PROMPT_REVISION}.`,
     'Inspect exactly the attached media body. Return only one JSON object, without Markdown fences or prose.',
     'Use exactly these keys: attachmentRef, summary, salientFacts, uncertainties.',
     'attachmentRef must equal the supplied F reference. summary must be concise but semantically complete.',
-    'salientFacts and uncertainties must be JSON string arrays. Do not infer facts that are not visible.'
+    'salientFacts and uncertainties must be JSON string arrays. Do not infer facts that are not visible.',
+    `Hard limits: summary at most ${ATTACHMENT_OBSERVATION_MAX_SUMMARY_CHARS} characters;`
+      + ` salientFacts at most ${ATTACHMENT_OBSERVATION_MAX_SALIENT_FACTS} items;`
+      + ` uncertainties at most ${ATTACHMENT_OBSERVATION_MAX_UNCERTAINTIES} items;`
+      + ` every array item at most ${ATTACHMENT_OBSERVATION_MAX_ITEM_CHARS} characters.`,
+    'Emit the JSON object as the very first and only visible output. Never place it inside reasoning.',
+    ...(correction ? [`Your previous reply was rejected: ${correction} Return only the corrected JSON object.`] : [])
   ].join('\n');
   const sourceContent: MessageContent = {
     role: 'user',
@@ -2220,11 +2255,60 @@ function buildAttachmentObservationProviderCall(
       systemInstruction: { parts: [{ text: systemPrompt }] },
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: SUMMARY_PROVIDER_MIN_OUTPUT_TOKENS,
+        maxOutputTokens: ATTACHMENT_OBSERVATION_MAX_OUTPUT_TOKENS,
         thinkingConfig: { thinkingLevel: 'low' }
       }
     }
   };
+}
+
+// Scans for the first balanced top-level JSON object, ignoring braces inside
+// strings. Lets a Provider that wraps its JSON in prose still succeed.
+function extractFirstJsonObject(text: string): string | undefined {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) return text.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+// Clamps instead of rejecting: an over-long list is a formatting wobble, not a
+// reason to abort the whole compression turn.
+function coerceObservationTextList(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const items: string[] = [];
+  for (const entry of value) {
+    if (items.length >= maxItems) break;
+    const text = typeof entry === 'string'
+      ? entry
+      : typeof entry === 'number' || typeof entry === 'boolean'
+        ? String(entry)
+        : undefined;
+    if (text === undefined) continue;
+    const trimmed = text.trim();
+    if (trimmed.length === 0) continue;
+    items.push(trimmed.slice(0, ATTACHMENT_OBSERVATION_MAX_ITEM_CHARS));
+  }
+  return items;
 }
 
 function parseAttachmentObservationResponse(
@@ -2232,19 +2316,45 @@ function parseAttachmentObservationResponse(
   expectedRef: string
 ): LlmAttachmentObservation {
   const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error('Attachment observation response was empty.');
+  }
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
-  const source = fenced ? fenced[1]!.trim() : trimmed;
-  const parsed = JSON.parse(source) as unknown;
+  const candidate = fenced ? fenced[1]!.trim() : trimmed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate) as unknown;
+  } catch (error) {
+    const extracted = extractFirstJsonObject(candidate) ?? extractFirstJsonObject(trimmed);
+    if (!extracted) throw error;
+    parsed = JSON.parse(extracted) as unknown;
+  }
   if (!isRecord(parsed)) throw new TypeError('Attachment observation response must be an object.');
-  const allowed = new Set(['attachmentRef', 'summary', 'salientFacts', 'uncertainties']);
-  if (Object.keys(parsed).some((key) => !allowed.has(key)) || Object.keys(parsed).length !== allowed.size) {
-    throw new TypeError('Attachment observation response has unexpected or missing keys.');
+  const summaryText = typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+  if (summaryText.length === 0) {
+    throw new TypeError('Attachment observation response is missing a summary.');
   }
-  const observation = normalizeLlmAttachmentObservation(parsed, 'Attachment observation response');
-  if (observation.attachmentRef !== expectedRef) {
-    throw new Error(`Attachment observation response must use ${expectedRef}.`);
+  if (parsed.attachmentRef !== undefined && parsed.attachmentRef !== expectedRef) {
+    logCompressionDebug('provider.compact.observation.refMismatch', {
+      expectedRef,
+      reportedRef: parsed.attachmentRef
+    });
   }
-  return observation;
+  // Unknown keys are dropped and the F reference is taken from the frozen
+  // requirement: each call carries exactly one media body, so the caller is the
+  // authoritative source for the reference.
+  return normalizeLlmAttachmentObservation({
+    attachmentRef: expectedRef,
+    summary: summaryText.slice(0, ATTACHMENT_OBSERVATION_MAX_SUMMARY_CHARS),
+    salientFacts: coerceObservationTextList(
+      parsed.salientFacts,
+      ATTACHMENT_OBSERVATION_MAX_SALIENT_FACTS
+    ),
+    uncertainties: coerceObservationTextList(
+      parsed.uncertainties,
+      ATTACHMENT_OBSERVATION_MAX_UNCERTAINTIES
+    )
+  }, 'Attachment observation response');
 }
 
 function projectCompressionRequestWithObservations(
